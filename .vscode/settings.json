@@ -1,0 +1,13 @@
+{
+    "python.testing.pytestArgs": [
+        "."
+    ],
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestEnabled": true,
+    "livePreview.defaultPreviewPath": "/graph.html",
+    "terminal.integrated.env.windows": {
+        "PATH": "C:\\Users\\JPR\\anaconda3\\Scripts;${env:PATH}"
+    },
+    "notebook.output.scrolling": true,
+    "notebook.output.wordWrap": true
+}

@@ -1,0 +1,27 @@
+{
+    "version": "0.2.0",
+    "configurations": [      
+      {
+        "name": "Debug Current File",
+        "type": "python",
+        "request": "launch",
+        "program": "${file}",
+        "console": "integratedTerminal"
+      },
+      {
+        "name": "Profile Python Code",
+        "type": "python",
+        "request": "launch",
+        "program": "${file}",
+        "console": "integratedTerminal",
+        "justMyCode": true,
+        "args": [
+            "-m",
+            "cProfile",
+            "-o",
+            "profile_results.prof"
+        ]
+    }
+    ]
+  }
+  

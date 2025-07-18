@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools", "wheel", "torch", "numpy", "pandas"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pristine"
+version = "0.1.0"
+description = "A maximum-likelihood phylogenetics framework."
+authors = [{name = "Jean-Philippe Rasigade", email = "jean-philippe.rasigade@univ-lyon1.fr"}]
+license = {text = "AGPL3.0"}
+readme = "README.md"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ["."]

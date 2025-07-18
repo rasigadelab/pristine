@@ -1,0 +1,88 @@
+#%%
+"""
+Tree-wise BDS
+"""
+import torch
+
+#########################################################################
+# SIMULATE
+#########################################################################
+print("Simulating data...")
+from pristine.binarytree import BinaryTreeNode
+from pristine.bds_model import BirthDeathSamplingNodeData, BirthDeathSamplingSimulator
+
+# A forward model object exposes a simulate(node) function to generate
+# data or parameters during forward simulation. Here we use the 
+# BirthDeathSamplingNodeData base class to provide constant BDS parameters.
+class ConstantBDSVisitor:
+    """
+    Implement functions to generate data and BDS parameters
+    along a tree so that data can influence tree growth.
+    """
+    def __init__(self):
+        pass
+    
+    def visit(self, node: BinaryTreeNode)->None:
+        node.data = BirthDeathSamplingNodeData(2.0, 0.0, 1.0)
+
+root: BinaryTreeNode=BinaryTreeNode()
+bdsforward = BirthDeathSamplingSimulator(root, ConstantBDSVisitor())
+
+n = 100
+root = bdsforward.simulate(n)
+root.visualize()
+
+#########################################################################
+# MODEL ENERGY FUNCTION - TREEWISE BDS
+#########################################################################
+
+from pristine.edgelist import TreeTimeCalibrator
+from pristine.bds_model import BirthDeathSamplingTreeWise
+
+class Model:
+    def __init__(self, 
+                 bds: BirthDeathSamplingTreeWise,
+                 treecal: TreeTimeCalibrator
+                 ):
+        self.bds: BirthDeathSamplingTreeWise = bds
+        self.treecal: TreeTimeCalibrator = treecal
+
+    def loss(self):
+        return -self.bds.log_likelihood(self.treecal)
+
+#########################################################################
+# PREPARE INITIAL GUESS
+#########################################################################
+
+treecal = root.edgelist().get_tree_time_calibrator_fixed()
+bds = BirthDeathSamplingTreeWise(
+    birth_log=torch.tensor(0., requires_grad=True),
+    death_log=torch.tensor(float('-inf')),
+    sampling_log=torch.tensor(0., requires_grad=True),
+)
+
+#########################################################################
+# OPTIMIZE AND PRINT RESULTS
+#########################################################################
+
+import pristine.optimize
+import time
+
+model = Model(bds=bds, treecal=treecal)
+loss_init = model.loss().item()
+optim = pristine.optimize.Optimizer(model)
+
+start = time.perf_counter()
+optim.optimize()
+stop = time.perf_counter()
+
+print("")
+print(f"Initial loss: {loss_init: .3e}")
+print(f"Final loss={model.loss().item():.3e}")
+print(f"Elapsed time: {stop - start:.3f}s")
+
+print("")
+birth, death, sampling = bds.birth_death_sampling_rates()
+print(f"Birth rate    = {birth.item(): 0.2f}, ground truth = {root.data.birth_rate}")
+print(f"Death rate    = {death.item(): 0.2f}, ground truth = {root.data.death_rate}")
+print(f"Sampling rate = {sampling.item(): 0.2f}, ground truth = {root.data.sampling_rate}")
