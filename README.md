@@ -1,6 +1,8 @@
 # PRISTINE
 
-**PRISTINE** (PRofile-based Inference for STatIstical NEtworks) is a high-performance, differentiable framework for statistical inference on phylogenetic trees. It emphasizes robust likelihood computation, manual parameter control, and uncertainty quantification, with native support for PyTorch≥2.6 and Python≥3.10.
+**PRISTINE** (PRofile-based Inference for STatIstical NEtworks) is a high-performance, differentiable framework for statistical inference on phylogenetic trees. It emphasizes robust likelihood computation, flexible parameter control, changing fixed and free parameters, uncertainty quantification, and model identifiability analysis.
+
+See [PRISTINE documentation](https://rasigadelab.github.io/pristine/) for more details.
 
 ---
 
