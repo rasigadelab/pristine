@@ -1,4 +1,4 @@
-# PRISTINE
+# <span style="color:red">PRISTINE</span> phylodynamics
 
 **PRISTINE** (PRofile-based Inference for STatIstical NEtworks) is a high-performance, differentiable framework for statistical inference on phylogenetic trees. It emphasizes robust likelihood computation, flexible parameter control, changing fixed and free parameters, uncertainty quantification, and model identifiability analysis.
 
