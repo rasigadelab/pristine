@@ -1,0 +1,55 @@
+
+site_name: PRISTINE
+site_url: https://rasigadelab.github.io/pristine/
+repo_url: https://github.com/rasigadelab/pristine
+repo_name: rasigadelab/pristine
+
+theme:
+  name: material
+  palette:
+  - scheme: slate
+    primary: blue
+    accent: indigo
+    toggle:
+      icon: material/lightbulb
+      name: Switch to light mode
+
+  - scheme: default
+    primary: blue
+    accent: indigo
+    toggle:
+      icon: material/lightbulb-outline
+      name: Switch to dark mode
+
+  features:
+    - navigation.sections
+    - navigation.expand
+    - content.code.copy
+
+markdown_extensions:
+  - toc:
+      permalink: true
+  - pymdownx.superfences
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.emoji
+  - pymdownx.details
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Tutorials:
+      - Likelihood Inference: tutorials/inference.md
+  - Mathematical Foundations:
+      - Optimization Algorithm: math/optimization.md
+      - Molecular clock models: math/molecular_clock.md
+      - Markov and GTR models: math/gtr_model.md
+      - Felsenstein Algorithm: math/felsenstein.md
+      - Birth-Death-Sampling models: math/bds_model.md
+      - Laplace Approximation: math/laplace.md
+      - Likelihood Profiling: math/likelihood_profiler.md
+
+extra_javascript:
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
