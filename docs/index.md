@@ -3,6 +3,7 @@
 PRISTINE is a modular framework for phylogenetic likelihood inference, built in PyTorch ≥ 2.6 and Python ≥ 3.10.
 
 It supports:
+
 - Efficient likelihood computation with Felsenstein's pruning algorithm
 - Model-based simulation and inference (e.g., GTR, BDS)
 - Parameter profiling and Laplace approximation
