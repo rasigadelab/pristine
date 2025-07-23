@@ -273,7 +273,7 @@ def stadler_p0(age, birth, death, sampling):
     return p0
 
 #########################################################################
-# BIRTH-DEATH-SAMPLING MODEL EVALUATION
+# BIRTH-DEATH-SAMPLING, CONSTANT AND MULTISTATE
 #########################################################################
 
 @torch.jit.script
@@ -376,6 +376,75 @@ class StateDependentBirthDeathSampling:
         bds_log_likelihood = weighted_qmat_rowsumlogs
         return bds_log_likelihood
 
+#########################################################################
+# BIRTH-DEATH-SAMPLING, NODE-SPECIFIC BIRTH RATE
+#########################################################################
+
+@torch.jit.script
+def per_parent_birth_log_likelihood(
+        parent_log_birth_rate: torch.Tensor, 
+        treecal: TreeTimeCalibrator, 
+        log_death: torch.Tensor, 
+        log_sampling: torch.Tensor)->torch.Tensor:
+    """
+    Compute the total log-likelihood of a time-calibrated phylogenetic tree under a
+    birth–death–sampling (BDS) process where each edge inherits its birth rate from its
+    parent node.
+
+    This function assumes that:
+        • Birth rates vary per edge, and are defined by the parent node of each edge.
+        • Death and sampling rates are constant across the tree.
+        • Internal nodes represent birth events; tips represent sampling events.
+        • The birth rate is passed in log form for each edge (one value per edge).
+
+    Args:
+        parent_log_birth_rate (torch.Tensor):
+            A tensor of shape [E] where E = number of edges.
+            Each value is the log birth rate associated with the edge's **parent node**.
+
+        treecal (TreeTimeCalibrator):
+            A calibrated tree object containing edge structure, node ages,
+            and tip/internal node mappings.
+
+        log_death (torch.Tensor):
+            Scalar tensor representing the global log-death (extinction) rate.
+
+        log_sampling (torch.Tensor):
+            Scalar tensor representing the global log-sampling rate.
+
+    Returns:
+        torch.Tensor:
+            A scalar tensor representing the log-likelihood of the tree under the model,
+            computed as:
+
+            $$
+            \log L = \sum_e \log \left( \frac{q(t_{\text{child}})}{q(t_{\text{parent}})} \right)
+                   + \sum_{e \in \text{internal edges}} \log \lambda_{\text{parent}(e)}
+                   + n_{\text{tips}} \cdot \log \psi
+            $$
+
+            where:
+              • $q(t)$ is Stadler's q-function evaluated at node age $t$
+              • $\lambda$ is the birth rate (exp of `parent_log_birth_rate`)
+              • $\psi$ is the sampling rate
+    """    
+    ages = treecal.ages()  
+    parent_birth_rate = parent_log_birth_rate.exp()                          # [E]
+    death = log_death.exp()
+    sampling = log_sampling.exp()
+
+    # Evaluate Stadler's q-ratio using parent-specific birth rate    
+    q_parent = stadler_q_general(ages[treecal.parents], parent_birth_rate, death, sampling)
+    q_child = stadler_q_general(ages[treecal.children], parent_birth_rate, death, sampling)
+    q_ratio = q_child / q_parent
+
+    logL = (
+        torch.log(q_ratio).sum()
+        + parent_log_birth_rate[treecal.internal_edge_indices()].sum()
+        + treecal.ntips() * log_sampling
+    )
+    return logL
+
 @torch.jit.script
 class LinearMarkerBirthModel:
     """
@@ -400,43 +469,31 @@ class LinearMarkerBirthModel:
         self.num_markers: int = ancestor_states.shape[1]
         self.num_states: int = ancestor_states.shape[2]
         self.coeffs: torch.Tensor = torch.zeros([self.num_markers, self.num_states - 1]).requires_grad_(True)
-        self.death_log: torch.Tensor = torch.tensor(float('-inf'))  # death = 0
-        self.sampling_log: torch.Tensor = torch.tensor(0.).requires_grad_(True)
+        self.log_death: torch.Tensor = torch.tensor(float('-inf'))  # death = 0
+        self.log_sampling: torch.Tensor = torch.tensor(0.).requires_grad_(True)
+        self.local_parent_idx = treecal.parent_node_index_lookup()
 
     def death(self)->torch.Tensor:
-        return self.death_log.exp()
+        return self.log_death.exp()
 
     def sampling(self)->torch.Tensor:
-        return self.sampling_log.exp() 
-    
+        return self.log_sampling.exp() 
+
     def log_likelihood(self) -> torch.Tensor:
         """
         Compute log-likelihood under BDS with log-linear birth model.
         Birth rate is modeled as: log(λ_i) = intercept + Σ (w_mk · prob_mk)
         """
-        # Step 1: Compute expected *log* birth rate at each node
-        probs_nonref = self.ancestor_states[:, :, 1:].clone()  # shape (N, L, K-1)
-        log_birth_expect = self.intercept + torch.einsum("nmk,mk->n", probs_nonref, self.coeffs)  # (N,)
-        birth_expect = log_birth_expect.exp()  # (N,)
+        # Step 1: Compute expected log birth rate at each node
+        node_state_probs = self.ancestor_states[self.treecal.node_indices, :, 1:].clone()  # shape (N, L, K-1)
+        node_log_birth_rate_estimate = self.intercept \
+                + torch.einsum("nmk,mk->n", node_state_probs, self.coeffs)  # (N,)
 
-        # Step 2: Constants
-        death = self.death()
-        sampling = self.sampling()
-
-        # Step 3: Parent birth rates on edges
-        parent_birth = birth_expect[self.treecal.parents]  # (E,)
-        ages = self.treecal.ages()
-        q_parent = stadler_q_general(ages[self.treecal.parents], parent_birth, death, sampling)
-        q_child = stadler_q_general(ages[self.treecal.children], parent_birth, death, sampling)
-        q_ratio = q_child / q_parent
-
-        # Step 4: Log-likelihood
-        logL = (
-              torch.log(q_ratio).sum()
-            + self.treecal.nnodes() * log_birth_expect[self.treecal.parents].sum() / parent_birth.numel()
-            + self.treecal.ntips() * self.sampling_log
+        parent_log_birth_rate = node_log_birth_rate_estimate[self.local_parent_idx]  # (E,)
+        
+        return per_parent_birth_log_likelihood(
+            parent_log_birth_rate, self.treecal, self.log_death, self.log_sampling
         )
-        return logL
 
 @torch.jit.script
 class RelaxedBirthModel:
@@ -477,15 +534,14 @@ class RelaxedBirthModel:
         self.log_birth_nodes = torch.zeros_like(treecal.node_dates).requires_grad_()
         self.log_death = torch.tensor(float("-inf"))  # extinction disabled
         self.log_sampling = torch.tensor(0.).requires_grad_()
+        self.local_parent_idx = treecal.parent_node_index_lookup()
+    
+    def death(self)->torch.Tensor:
+        return self.log_death.exp()
 
-        # Build a lookup: global node ID → index into log_birth_nodes
-        parent_idx_global = self.treecal.parents                      # shape: [E]
-        node_index_map = self.treecal.node_indices                   # shape: [N_nodes]
-        N = treecal.nnodes() + treecal.ntips()
-        node_id_to_local = torch.zeros(N, dtype=torch.long) - 1      # initialize to -1
-        node_id_to_local[node_index_map] = torch.arange(len(node_index_map))
-        self.local_parent_idx = node_id_to_local[parent_idx_global]  # shape: [E]
-
+    def sampling(self)->torch.Tensor:
+        return self.log_sampling.exp() 
+    
     def log_likelihood(self) -> torch.Tensor:
         r"""
         Computes the log-likelihood of the dated tree under the relaxed birth model.
@@ -504,28 +560,9 @@ class RelaxedBirthModel:
         Returns:
             torch.Tensor: scalar log-likelihood
         """
-        ages = self.treecal.ages()  # shape: [N_total = nodes + tips]
-        death = self.log_death.exp()
-        sampling = self.log_sampling.exp()
-
-        # Select log birth rate of edge parents (via lookup)
-        log_birth_parents = self.log_birth_nodes[self.local_parent_idx]  # [E]
-        birth_parents = log_birth_parents.exp()                          # [E]
-
-        # Extract node ages for edge endpoints
-        age_parents = ages[self.treecal.parents]
-        age_children = ages[self.treecal.children]
-
-        # Evaluate Stadler's q-ratio using parent-specific birth rate
-        q_parent = stadler_q_general(age_parents, birth_parents, death, sampling)
-        q_child = stadler_q_general(age_children, birth_parents, death, sampling)
-        q_ratio = q_child / q_parent
-
-        logL = (
-            torch.log(q_ratio).sum() +
-            log_birth_parents.sum() +
-            self.treecal.ntips() * self.log_sampling
+        parent_log_birth_rate = self.log_birth_nodes[self.local_parent_idx]  # [E]
+        return per_parent_birth_log_likelihood(
+            parent_log_birth_rate, self.treecal, self.log_death, self.log_sampling
         )
-        return logL
 
 

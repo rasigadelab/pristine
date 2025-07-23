@@ -101,6 +101,53 @@ class TreeTimeCalibrator:
         durations = dates[self.children] - dates[self.parents]
         return durations
     
+    def internal_edge_indices(self) -> torch.Tensor:
+        """
+        Return the indices of edges whose child is NOT a tip (i.e., internal→internal).
+        """
+        mask = ~torch.isin(self.children, self.tip_indices)
+        return torch.nonzero(mask).squeeze(1)
+
+    def terminal_edge_indices(self) -> torch.Tensor:
+        """
+        Return the indices of edges whose child is a tip (i.e., internal→tip).
+        """
+        mask = torch.isin(self.children, self.tip_indices)
+        return torch.nonzero(mask).squeeze(1)
+
+    def parent_node_index_lookup(self) -> torch.Tensor:
+        """
+        Return a lookup tensor mapping each edge's parent (global node index)
+        to its local index in the internal node tensor (`node_dates` or any [N_nodes]-length parameter).
+
+        This is needed when parameters (e.g., birth rates) are stored only for internal nodes,
+        and must be indexed per edge using the global parent node IDs.
+
+        Returns:
+            Tensor of shape [E], where E = number of edges. Each value is an index into
+            the [N_nodes]-length internal node vector corresponding to self.node_indices.
+        """
+        N = self.nnodes() + self.ntips()
+        node_id_to_local = torch.full((N,), -1, dtype=torch.long)
+        node_id_to_local[self.node_indices] = torch.arange(self.nnodes(), dtype=torch.long)
+        return node_id_to_local[self.parents]
+
+    def child_node_index_lookup(self) -> torch.Tensor:
+        """
+        Return a lookup tensor mapping each edge's child (global node index)
+        to its local index in the internal node tensor (`node_dates` or similar).
+
+        This is useful when child-specific parameters are stored only for internal nodes,
+        and you need to map edge children to those.
+
+        Returns:
+            Tensor of shape [E], where E = number of edges. Each value is an index into
+            the [N_nodes]-length internal node vector, or -1 if the child is a tip.
+        """
+        N = self.nnodes() + self.ntips()
+        node_id_to_local = torch.full((N,), -1, dtype=torch.long)
+        node_id_to_local[self.node_indices] = torch.arange(self.nnodes(), dtype=torch.long)
+        return node_id_to_local[self.children]
 
 
 class EdgeList:

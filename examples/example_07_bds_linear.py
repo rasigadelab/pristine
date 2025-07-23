@@ -72,7 +72,7 @@ root.data.birth_rate = 1.0
 model = StatefulBDSSimulationVisitor(sequence_visitor)
 bdsforward = BirthDeathSamplingSimulator(root, model)
 
-n = 1600
+n = 800
 root = bdsforward.simulate(n)
 nodes = root.nodelist()
 
