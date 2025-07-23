@@ -391,18 +391,17 @@ class LinearMarkerBirthModel:
     """
     def __init__(self,
                  treecal: TreeTimeCalibrator,
-                 ancestor_states: torch.Tensor,  # shape (N, L, K),
-                 intercept: torch.Tensor,
-                 coeffs: torch.Tensor,  # shape (L, K-1)
-                 death_log: torch.Tensor,
-                 sampling_log: torch.Tensor):
+                 ancestor_states: torch.Tensor
+                 ):
 
         self.treecal: TreeTimeCalibrator = treecal
         self.ancestor_states: torch.Tensor = ancestor_states
-        self.intercept = intercept  # scalar
-        self.coeffs = coeffs        # (L, K-1)
-        self.death_log = death_log
-        self.sampling_log = sampling_log
+        self.intercept: torch.Tensor = torch.tensor(1.).requires_grad_(True)
+        self.num_markers: int = ancestor_states.shape[1]
+        self.num_states: int = ancestor_states.shape[2]
+        self.coeffs: torch.Tensor = torch.zeros([self.num_markers, self.num_states-1]).requires_grad_(True)        # (L, K-1)
+        self.death_log: torch.Tensor = torch.tensor(float('-inf'))
+        self.sampling_log: torch.Tensor = torch.tensor(0.).requires_grad_(True)
 
     def log_likelihood(self
                       ) -> torch.Tensor:
@@ -434,9 +433,9 @@ class LinearMarkerBirthModel:
 
         # Step 4: Likelihood components
         logL = (
-            torch.log(q_ratio).sum() +
-            (self.treecal.ntips() - 1.) * torch.log(parent_birth).sum() / parent_birth.numel() +
-            self.treecal.ntips() * self.sampling_log
+              torch.log(q_ratio).sum() 
+            + self.treecal.nnodes() * torch.log(parent_birth).sum() / parent_birth.numel()
+            + self.treecal.ntips() * self.sampling_log
         )
         return logL
 

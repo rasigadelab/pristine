@@ -90,10 +90,7 @@ class Model:
     def loss(self)->torch.Tensor:
 
         fpa_log_likelihood = self.fpa.log_likelihood().sum()
-        bds_log_likelihood = self.bds.log_likelihood(
-            # treecal=self.fpa.treecal,
-            # ancestor_states=self.fpa.ancestor_states
-        ).sum()
+        bds_log_likelihood = self.bds.log_likelihood().sum()
 
         return -fpa_log_likelihood -bds_log_likelihood
     
@@ -122,12 +119,7 @@ fpa = FelsensteinPruningAlgorithm(gtr_optim, markers, treecal)
 
 # BDS with a single sampling parameter
 bds = LinearMarkerBirthModel(treecal=treecal,
-                             ancestor_states=fpa.ancestor_states,
-                            intercept=torch.tensor(1.0, requires_grad=True),
-                             coeffs=torch.zeros([sequence_length, num_states-1], requires_grad=True),
-                             death_log=torch.tensor(float("-inf")),
-                             sampling_log=torch.tensor(0., requires_grad=True)
-                             )
+                             ancestor_states=fpa.ancestor_states)
 
 #########################################################################
 # OPTIMIZE AND PRINT RESULTS
