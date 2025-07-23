@@ -1,6 +1,7 @@
 #%%
 """
-State-dependent BDS.
+Relaxed BDS for exploratory analysis. Each parent node exhibits its own
+birth rate, independent of state or lineage.
 """
 import torch
 #########################################################################
@@ -62,7 +63,7 @@ root.data.birth_rate = 1.0
 model = StatefulBDSSimulationVisitor(sequence_visitor)
 bdsforward = BirthDeathSamplingSimulator(root, model)
 
-n = 1600
+n = 800
 root = bdsforward.simulate(n)
 # root.visualize()
 
@@ -72,19 +73,6 @@ Plot tree states
 # import toytree
 
 nodes = root.nodelist()
-# tree = toytree.tree(root.newick(), internal_labels="name")
-# tree_ordered_nodes = [nodes[ int(node.name) ] for node in tree.get_nodes()]
-
-# tree.set_node_data(feature="state", data =[node.data.state_indices().item() for node in tree_ordered_nodes], default=0, inplace=True)
-# tree.set_node_data(feature="birth", data =[node.data.birth_rate for node in tree_ordered_nodes], default=0, inplace=True)
-# tree.draw(
-#     node_labels="state", node_sizes=15, node_mask=False, node_colors=("state", "BlueRed"),
-#     edge_colors="white", edge_widths=1,
-#     tip_labels_style={"font-size": 10, "anchor-shift": 20},
-#     tip_labels_colors="white",
-#     scale_bar=True,
-#     width = 600
-# )
 
 """
 Check that branch lengths differ sufficiently depending on marker state
@@ -103,35 +91,31 @@ plt.boxplot([len_0, len_1], tick_labels=['State 0', 'State 1'])
 plt.title('Branch length depending on parent state')
 plt.ylabel('Branch length (y)')
 # plt.grid(True)
-# plt.show()
+plt.draw()
 
 #########################################################################
 # MODEL ENERGY FUNCTION
 #########################################################################
 """
-Support as many parameters as there are states
-
-Ancestor states stored in FPA.ancestor_states, shape (N, U, K)
+FPA not mandatory but useful here to recover ancestral states for display
+purpose.
 """
 
 from pristine.felsenstein import FelsensteinPruningAlgorithm
-from pristine.bds_model import StateDependentBirthDeathSampling
+from pristine.bds_model import RelaxedBirthModel
 
 class Model:
     def __init__(self, 
                  fpa: FelsensteinPruningAlgorithm,
-                 bds: StateDependentBirthDeathSampling
+                 bds: RelaxedBirthModel
                  ):
         self.fpa: FelsensteinPruningAlgorithm = fpa
-        self.bds: StateDependentBirthDeathSampling = bds
+        self.bds: RelaxedBirthModel = bds
 
     def loss(self)->torch.Tensor:
 
         fpa_log_likelihood = self.fpa.log_likelihood().sum()
-        bds_log_likelihood = self.bds.log_likelihood(
-            treecal=self.fpa.treecal,
-            ancestor_states=self.fpa.ancestor_states
-        ).sum()
+        bds_log_likelihood = self.bds.log_likelihood().sum()
 
         return -fpa_log_likelihood -bds_log_likelihood
     
@@ -158,11 +142,8 @@ gtr_optim.rates_log -= 4 # Don't start too far from the objective
 gtr_optim.rates_log.requires_grad_(True)
 fpa = FelsensteinPruningAlgorithm(gtr_optim, markers, treecal)
 
-# BDS with a single sampling parameter
-bds = StateDependentBirthDeathSampling(num_states)
-bds.birth_log.requires_grad_(True)
-bds.death_log.fill_(float("-inf")) # Fixed zero death rate
-bds.sampling_log = torch.tensor(0., requires_grad=True)
+# Relaxed BDS
+bds = RelaxedBirthModel(treecal)
 
 #########################################################################
 # OPTIMIZE AND PRINT RESULTS
@@ -170,6 +151,7 @@ bds.sampling_log = torch.tensor(0., requires_grad=True)
 print("Launching optimizer...")
 import pristine.optimize
 import time
+import matplotlib.pyplot as plt
 
 model = Model(fpa=fpa, bds=bds)
 loss_init = model.loss().item()
@@ -185,7 +167,71 @@ print(f"Final loss={model.loss().item():.3e}")
 print(f"Elapsed time: {stop - start:.3f}s")
 print(f"No. of iterations: {optim.num_iter}")
 
-print(f"Estimated state-dependent birth rate: {bds.birth_log.exp()[0]: .3f}, {bds.birth_log.exp()[1]: .3f}")
-# print(f"Estimated state-dependent sampling rate: {bds.sampling_log.exp()[0]: .3f}, {bds.sampling_log.exp()[1]: .3f}")
-print(f"Estimated state-dependent sampling rate: {bds.sampling_log.exp().item(): .3f}")
+def hist_birth_by_state(model, ancestor_states: torch.Tensor):
+    """
+    Plots log birth rates by most probable state (state 0 vs. 1) for internal nodes only.
 
+    Parameters:
+        model: RelaxedBirthModel (must have .log_birth_nodes and .treecal.node_indices)
+        ancestor_states: tensor of shape [N_total, L=1, K]
+    """
+    # Step 1: Restrict to internal nodes
+    node_ids = model.treecal.node_indices  # shape: [N_nodes]
+    anc_states_internal = ancestor_states[node_ids]  # shape: [N_nodes, 1, K]
+
+    # Step 2: Get MAP state for each node
+    state_assignments = anc_states_internal.squeeze(1).argmax(dim=-1)  # shape: [N_nodes]
+
+    # Step 3: Split log birth rates
+    log_birth_nodes = model.log_birth_nodes.detach().cpu()
+    log_rates_0 = log_birth_nodes[state_assignments == 0].numpy()
+    log_rates_1 = log_birth_nodes[state_assignments == 1].numpy()
+
+    # Step 4: Plot
+    plt.figure(figsize=(7, 4))
+    plt.hist(log_rates_0, bins=20, alpha=0.6, label="State 0", edgecolor="black")
+    plt.hist(log_rates_1, bins=20, alpha=0.6, label="State 1", edgecolor="black")
+    plt.xlabel("Log Birth Rate")
+    plt.ylabel("Count")
+    plt.title("Log Birth Rate by Most Probable State (Internal Nodes)")
+    plt.legend()
+    plt.tight_layout()
+    plt.draw()
+
+hist_birth_by_state(bds, fpa.ancestor_states)
+
+def boxplot_birth_by_state(model, ancestor_states: torch.Tensor):
+    """
+    Shows box plots of log birth rates by most probable state (state 0 vs. 1) for internal nodes.
+
+    Parameters:
+        model: RelaxedBirthModel (must have .log_birth_nodes and .treecal.node_indices)
+        ancestor_states: tensor of shape [N_total, L=1, K]
+    """
+    # Step 1: Restrict to internal nodes
+    node_ids = model.treecal.node_indices  # [N_nodes]
+    anc_states_internal = ancestor_states[node_ids]  # [N_nodes, 1, K]
+
+    # Step 2: Get most probable state
+    state_assignments = anc_states_internal.squeeze(1).argmax(dim=-1)  # [N_nodes]
+
+    # Step 3: Extract log birth rates
+    log_birth_nodes = model.log_birth_nodes.detach().cpu()
+    log_rates_0 = log_birth_nodes[state_assignments == 0].numpy()
+    log_rates_1 = log_birth_nodes[state_assignments == 1].numpy()
+
+    # Step 4: Box plot
+    plt.figure(figsize=(6, 4))
+    plt.boxplot([log_rates_0, log_rates_1],
+                labels=["State 0", "State 1"],
+                patch_artist=True,
+                boxprops=dict(facecolor="lightblue", color="black"),
+                medianprops=dict(color="darkblue"))
+    plt.ylabel("Log Birth Rate")
+    plt.title("Log Birth Rate by Most Probable State (Internal Nodes)")
+    plt.tight_layout()
+    plt.draw()
+
+boxplot_birth_by_state(bds, fpa.ancestor_states)
+
+# %%
