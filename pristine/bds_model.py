@@ -390,19 +390,21 @@ class LinearMarkerBirthModel:
         sampling_log (Tensor): log-sampling rate (scalar).
     """
     def __init__(self,
+                 treecal: TreeTimeCalibrator,
+                 ancestor_states: torch.Tensor,  # shape (N, L, K),
                  intercept: torch.Tensor,
                  coeffs: torch.Tensor,  # shape (L, K-1)
                  death_log: torch.Tensor,
                  sampling_log: torch.Tensor):
 
+        self.treecal: TreeTimeCalibrator = treecal
+        self.ancestor_states: torch.Tensor = ancestor_states
         self.intercept = intercept  # scalar
         self.coeffs = coeffs        # (L, K-1)
         self.death_log = death_log
         self.sampling_log = sampling_log
 
-    def log_likelihood(self,
-                       treecal: TreeTimeCalibrator,
-                       ancestor_states: torch.Tensor  # shape (N, L, K)
+    def log_likelihood(self
                       ) -> torch.Tensor:
         """
         Compute log-likelihood under BDS with linear birth model.
@@ -415,7 +417,7 @@ class LinearMarkerBirthModel:
             log-likelihood scalar
         """
         # Step 1: Compute expected birth rate at each node
-        probs_nonref = ancestor_states[:, :, 1:].clone()  # (N, L, K-1)
+        probs_nonref = self.ancestor_states[:, :, 1:].clone()  # (N, L, K-1)
         birth_expect = self.intercept + torch.einsum("nmk,mk->n", probs_nonref, self.coeffs)  # (N,)
         birth_expect = torch.clamp(birth_expect, min=1e-8)  # Ensure positivity
 
@@ -424,17 +426,17 @@ class LinearMarkerBirthModel:
         sampling = self.sampling_log.exp()
 
         # Step 3: Use parent's birth rate for q-ratio computation
-        ages = treecal.ages()  # (N,)
-        parent_birth = birth_expect[treecal.parents]  # (E,)
-        q_parent = stadler_q_general(ages[treecal.parents], parent_birth, death, sampling)
-        q_child = stadler_q_general(ages[treecal.children], parent_birth, death, sampling)
+        ages = self.treecal.ages()  # (N,)
+        parent_birth = birth_expect[self.treecal.parents]  # (E,)
+        q_parent = stadler_q_general(ages[self.treecal.parents], parent_birth, death, sampling)
+        q_child = stadler_q_general(ages[self.treecal.children], parent_birth, death, sampling)
         q_ratio = q_child / q_parent  # (E,)
 
         # Step 4: Likelihood components
         logL = (
             torch.log(q_ratio).sum() +
-            (treecal.ntips() - 1.) * torch.log(parent_birth).sum() / parent_birth.numel() +
-            treecal.ntips() * self.sampling_log
+            (self.treecal.ntips() - 1.) * torch.log(parent_birth).sum() / parent_birth.numel() +
+            self.treecal.ntips() * self.sampling_log
         )
         return logL
 
