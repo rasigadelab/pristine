@@ -37,29 +37,23 @@ root.visualize()
 #########################################################################
 
 from pristine.edgelist import TreeTimeCalibrator
-from pristine.bds_model import BirthDeathSamplingTreeWise
+from pristine.bds_model import ConstantBirthDeathSamplingModel
 
 class Model:
     def __init__(self, 
-                 bds: BirthDeathSamplingTreeWise,
-                 treecal: TreeTimeCalibrator
+                 bds: ConstantBirthDeathSamplingModel
                  ):
-        self.bds: BirthDeathSamplingTreeWise = bds
-        self.treecal: TreeTimeCalibrator = treecal
+        self.bds: ConstantBirthDeathSamplingModel = bds
 
     def loss(self):
-        return -self.bds.log_likelihood(self.treecal)
+        return -self.bds.log_likelihood()
 
 #########################################################################
 # PREPARE INITIAL GUESS
 #########################################################################
 
 treecal = root.edgelist().get_tree_time_calibrator_fixed()
-bds = BirthDeathSamplingTreeWise(
-    birth_log=torch.tensor(0., requires_grad=True),
-    death_log=torch.tensor(float('-inf')),
-    sampling_log=torch.tensor(0., requires_grad=True),
-)
+bds = ConstantBirthDeathSamplingModel(treecal)
 
 #########################################################################
 # OPTIMIZE AND PRINT RESULTS
@@ -68,7 +62,7 @@ bds = BirthDeathSamplingTreeWise(
 import pristine.optimize
 import time
 
-model = Model(bds=bds, treecal=treecal)
+model = Model(bds=bds)
 loss_init = model.loss().item()
 optim = pristine.optimize.Optimizer(model)
 
@@ -82,7 +76,7 @@ print(f"Final loss={model.loss().item():.3e}")
 print(f"Elapsed time: {stop - start:.3f}s")
 
 print("")
-birth, death, sampling = bds.birth_death_sampling_rates()
-print(f"Birth rate    = {birth.item(): 0.2f}, ground truth = {root.data.birth_rate}")
-print(f"Death rate    = {death.item(): 0.2f}, ground truth = {root.data.death_rate}")
-print(f"Sampling rate = {sampling.item(): 0.2f}, ground truth = {root.data.sampling_rate}")
+print(f"Birth rate    = {bds.birth().item(): 0.2f}, ground truth = {root.data.birth_rate}")
+print(f"Death rate    = {bds.death().item(): 0.2f}, ground truth = {root.data.death_rate}")
+print(f"Sampling rate = {bds.sampling().item(): 0.2f}, ground truth = {root.data.sampling_rate}")
+# %%

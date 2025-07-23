@@ -199,43 +199,6 @@ def stadler_q(age, birth, death, sampling):
     return q
 
 @torch.jit.script
-def stadler_q_matrix(age: torch.Tensor, birth: torch.Tensor, death: torch.Tensor, sampling: torch.Tensor) -> torch.Tensor:
-    """
-    Vectorized q values
-    """
-    # age: [N], birth, death, sampling: [K]
-    # Expand for broadcasting
-    age = age.unsqueeze(0)         # [1, N]
-    birth = birth.unsqueeze(1)     # [K, 1]
-    death = death.unsqueeze(1)     # [K, 1]
-    sampling = sampling.unsqueeze(1)  # [K, 1]
-
-    bdsdiff = birth - death - sampling        # [K, 1]
-    c1 = torch.sqrt(bdsdiff ** 2 + 4. * birth * sampling)  # [K, 1]
-    c2 = -bdsdiff / c1                         # [K, 1]
-
-    exp_neg = torch.exp(-c1 * age)             # [K, N]
-    exp_pos = torch.exp(c1 * age)              # [K, N]
-
-    q = (
-        2. * (1. - c2**2)                      # [K, 1]
-        + exp_neg * (1. - c2)**2               # [K, N]
-        + exp_pos * (1. + c2)**2               # [K, N]
-    )
-
-    # return q  # shape [K, N]
-    return q.transpose(0, 1)  # shape [N, K]
-
-@torch.jit.script
-def stadler_p0(age, birth, death, sampling):
-    bdsdiff = birth - death - sampling
-    c1 = torch.sqrt(torch.square(bdsdiff) + 4. * birth * sampling)
-    c2 = -bdsdiff / c1
-    c3 = torch.exp(-c1 * age) * (1. - c2)
-    p0 = (birth + death + sampling + c1 * (c3 - (1. + c2)) / (c3 + (1. + c2))) / (2. * birth)
-    return p0
-
-@torch.jit.script
 def stadler_q_general(ages: torch.Tensor,
                       birth: torch.Tensor,
                       death: torch.Tensor,
@@ -272,47 +235,76 @@ def stadler_q_general(ages: torch.Tensor,
     )
     return q
 
+@torch.jit.script
+def stadler_q_matrix(age: torch.Tensor, birth: torch.Tensor, death: torch.Tensor, sampling: torch.Tensor) -> torch.Tensor:
+    """
+    Vectorized q values
+    """
+    # age: [N], birth, death, sampling: [K]
+    # Expand for broadcasting
+    age = age.unsqueeze(0)         # [1, N]
+    birth = birth.unsqueeze(1)     # [K, 1]
+    death = death.unsqueeze(1)     # [K, 1]
+    sampling = sampling.unsqueeze(1)  # [K, 1]
+
+    bdsdiff = birth - death - sampling        # [K, 1]
+    c1 = torch.sqrt(bdsdiff ** 2 + 4. * birth * sampling)  # [K, 1]
+    c2 = -bdsdiff / c1                         # [K, 1]
+
+    exp_neg = torch.exp(-c1 * age)             # [K, N]
+    exp_pos = torch.exp(c1 * age)              # [K, N]
+
+    q = (
+        2. * (1. - c2**2)                      # [K, 1]
+        + exp_neg * (1. - c2)**2               # [K, N]
+        + exp_pos * (1. + c2)**2               # [K, N]
+    )
+
+    # return q  # shape [K, N]
+    return q.transpose(0, 1)  # shape [N, K]
+
+@torch.jit.script
+def stadler_p0(age, birth, death, sampling):
+    bdsdiff = birth - death - sampling
+    c1 = torch.sqrt(torch.square(bdsdiff) + 4. * birth * sampling)
+    c2 = -bdsdiff / c1
+    c3 = torch.exp(-c1 * age) * (1. - c2)
+    p0 = (birth + death + sampling + c1 * (c3 - (1. + c2)) / (c3 + (1. + c2))) / (2. * birth)
+    return p0
+
 #########################################################################
 # BIRTH-DEATH-SAMPLING MODEL EVALUATION
 #########################################################################
 
 @torch.jit.script
-class BirthDeathSamplingTreeWise:
+class ConstantBirthDeathSamplingModel:
+    """
+    Birth-death-sampling model with constant parameters across the whole tree
+    """
+    def __init__(self, treecal: TreeTimeCalibrator):
+        self.treecal: TreeTimeCalibrator = treecal
+        self.birth_log: torch.Tensor = torch.tensor(0.).requires_grad_(True)
+        self.death_log: torch.Tensor = torch.tensor(float('-inf'))
+        self.sampling_log: torch.Tensor = torch.tensor(0.).requires_grad_(True)
 
-    def __init__(self,
-                 birth_log: torch.Tensor,
-                 death_log: torch.Tensor,
-                 sampling_log: torch.Tensor
-                 ):
-        self.birth_log: torch.Tensor = birth_log
-        self.death_log: torch.Tensor = death_log
-        self.sampling_log: torch.Tensor = sampling_log
+    def birth(self)->torch.Tensor:
+        return self.birth_log.exp()
 
-    def birth_death_sampling_rates(self)->Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return self.birth_log.exp(), self.death_log.exp(), self.sampling_log.exp()
+    def death(self)->torch.Tensor:
+        return self.death_log.exp()
+
+    def sampling(self)->torch.Tensor:
+        return self.sampling_log.exp() 
     
-    def stadler_q(self, ages)->torch.Tensor:
-        birth, death, sampling = self.birth_death_sampling_rates()
-        bdsdiff = birth - death - sampling
-        c1 = torch.sqrt(torch.square(bdsdiff) + 4. * birth * sampling)
-        c2 = -bdsdiff / c1
-        q = 2.*(1.-torch.square(c2)) + torch.exp(-c1 * ages) * torch.square(1. - c2) + torch.exp( c1 * ages) * torch.square(1. + c2)
-        return q
-    
-    def log_likelihood(self, treecal: TreeTimeCalibrator):
-        # Q-ratio terms
-        q_terms = self.stadler_q(treecal.ages())
-        q_ratios = q_terms[treecal.children] / q_terms[treecal.parents]
-        # Treewise-constant BDS term        
-        bds_log_likelihood = (
-            # Edges terms
-              torch.log( q_ratios ).sum() 
-            # Node terms (birth events)
-            + (treecal.ntips() - 1.) * self.birth_log
-            # Tip terms (sampling events)
-            + treecal.ntips() * self.sampling_log
-            )
-        return bds_log_likelihood
+    def log_likelihood(self):
+        # log q-values
+        q_terms_log = stadler_q(self.treecal.ages(), self.birth(), self.death(), self.sampling()).log()
+        return (
+              self.treecal.nnodes() * self.birth_log
+            + self.treecal.ntips() * self.sampling_log
+            + q_terms_log[self.treecal.tip_indices].sum()
+            - q_terms_log[self.treecal.node_indices].sum()
+        )
     
 @torch.jit.script
 class StateDependentBirthDeathSampling:
@@ -320,15 +312,15 @@ class StateDependentBirthDeathSampling:
     BDS parameters are constructed along the states
     """
     def __init__(self,
-                 num_states: int,
-                 birth_log: Optional[torch.Tensor] = None,
-                 death_log: Optional[torch.Tensor] = None,
-                 sampling_log: Optional[torch.Tensor] = None,
+                 treecal: TreeTimeCalibrator,
+                 num_states: int
                  ):
+        self.treecal: TreeTimeCalibrator = treecal
         self.num_states: int = num_states
-        self.birth_log: torch.Tensor = birth_log if birth_log is not None else torch.zeros(num_states)
-        self.death_log: torch.Tensor = death_log if death_log is not None else torch.zeros(num_states)
-        self.sampling_log: torch.Tensor = sampling_log if sampling_log is not None else torch.zeros(num_states)
+        self.birth_log: torch.Tensor = torch.tensor(0.).requires_grad_(True)
+        self.death_log: torch.Tensor = torch.tensor(float('-inf'))
+        self.sampling_log: torch.Tensor = torch.tensor(0.).requires_grad_(True)
+        
     
     def birth(self)->torch.Tensor:
         return self.birth_log.exp().expand(self.num_states)
@@ -339,38 +331,39 @@ class StateDependentBirthDeathSampling:
     def sampling(self)->torch.Tensor:
         return self.sampling_log.exp().expand(self.num_states)
 
-    def log_likelihood(self, treecal: TreeTimeCalibrator, ancestor_states: torch.Tensor)->torch.Tensor:
+    def log_likelihood(self, ancestor_states: torch.Tensor)->torch.Tensor:
 
-        birth = self.birth_log.exp().expand(self.num_states)
-        death = self.death_log.exp().expand(self.num_states)
-        sampling = self.sampling_log.exp().expand(self.num_states)
+        # Expand parameter vectors if required
+        birth = self.birth()
+        death = self.death()
+        sampling = self.sampling()
 
-        ages = treecal.ages()
+        ages = self.treecal.ages()
         qmat = stadler_q_matrix(ages, birth, death, sampling) # shape (N, K)
         """
         q-ratio at each edge
         """
-        q_ratio = qmat[treecal.children] / qmat[treecal.parents]
+        q_ratio = qmat[self.treecal.children] / qmat[self.treecal.parents]
         """
         Probability at each parent, tensor [E, K]. Beware that ancestor markers has shape [N L K]
         with L=1 in our case. Leaving this 3D form will introduce subtle, silent bug so don't forget
         to call .squeeze(1).
         """
-        parent_state_prob = ancestor_states[treecal.parents].squeeze(1)
+        parent_state_prob = ancestor_states[self.treecal.parents].squeeze(1)
         """
         Event probabilities, as a [E, K] tensor with a row equal to 'sampling' if
         the edge child is a tip, or equal to 'birth' otherwise. FIXME this assumes that
         a node is either a birth or a sampling event.
         """
         # Step 1: identify tip children
-        edge_child_is_tip = torch.isin(treecal.children, treecal.tip_indices)    # [E], dtype=bool
+        edge_child_is_tip = torch.isin(self.treecal.children, self.treecal.tip_indices)    # [E], dtype=bool
 
         # Step 2: create a mask for broadcasting: [E, 1]
         mask = edge_child_is_tip.unsqueeze(1)  # [E, 1]
 
         # Step 3: broadcast birth and sampling to [E, K]
-        birth_rows = birth.unsqueeze(0).expand(treecal.nedges(), self.num_states)      # [E, K]
-        sampling_rows = sampling.unsqueeze(0).expand(treecal.nedges(), self.num_states)  # [E, K]
+        birth_rows = birth.unsqueeze(0).expand(self.treecal.nedges(), self.num_states)      # [E, K]
+        sampling_rows = sampling.unsqueeze(0).expand(self.treecal.nedges(), self.num_states)  # [E, K]
 
         # Step 4: use the mask to select between them
         sampling_or_birth = torch.where(mask, sampling_rows, birth_rows)  # [E, K]
@@ -426,25 +419,23 @@ class LinearMarkerBirthModel:
         birth_expect = self.intercept + torch.einsum("nmk,mk->n", probs_nonref, self.coeffs)  # (N,)
         birth_expect = torch.clamp(birth_expect, min=1e-8)  # Ensure positivity
 
-        # Step 2: Extract birth rate at parent of each edge
-        birth_edge = birth_expect[treecal.parents]  # (E,)
-
-        # Step 3: Constant death/sampling (scalar)
+        # Step 2: Constant death/sampling (scalar)
         death = self.death_log.exp()
         sampling = self.sampling_log.exp()
 
-        # Step 4: Use stable q-ratio computation via general q function
+        # Step 3: Use parent's birth rate for q-ratio computation
         ages = treecal.ages()  # (N,)
-        q = stadler_q_general(ages, birth_expect, death, sampling)  # (N,)
-        q_ratio = q[treecal.children] / q[treecal.parents]  # (E,)
+        parent_birth = birth_expect[treecal.parents]  # (E,)
+        q_parent = stadler_q_general(ages[treecal.parents], parent_birth, death, sampling)
+        q_child = stadler_q_general(ages[treecal.children], parent_birth, death, sampling)
+        q_ratio = q_child / q_parent  # (E,)
 
-        # Step 5: Likelihood components
+        # Step 4: Likelihood components
         logL = (
             torch.log(q_ratio).sum() +
-            (treecal.ntips() - 1.) * torch.log(birth_edge).sum() / birth_edge.numel() +
+            (treecal.ntips() - 1.) * torch.log(parent_birth).sum() / parent_birth.numel() +
             treecal.ntips() * self.sampling_log
         )
-
         return logL
 
 

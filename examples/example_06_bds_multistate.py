@@ -129,11 +129,10 @@ class Model:
 
         fpa_log_likelihood = self.fpa.log_likelihood().sum()
         bds_log_likelihood = self.bds.log_likelihood(
-            treecal=self.fpa.treecal,
             ancestor_states=self.fpa.ancestor_states
         ).sum()
 
-        return -fpa_log_likelihood -bds_log_likelihood
+        return -fpa_log_likelihood - bds_log_likelihood
     
 #########################################################################
 # PREPARE INITIAL GUESS
@@ -159,10 +158,8 @@ gtr_optim.rates_log.requires_grad_(True)
 fpa = FelsensteinPruningAlgorithm(gtr_optim, markers, treecal)
 
 # BDS with a single sampling parameter
-bds = StateDependentBirthDeathSampling(num_states)
-bds.birth_log.requires_grad_(True)
-bds.death_log.fill_(float("-inf")) # Fixed zero death rate
-bds.sampling_log = torch.tensor(0., requires_grad=True)
+bds = StateDependentBirthDeathSampling(treecal, num_states)
+bds.birth_log = torch.zeros(num_states, requires_grad=True)
 
 #########################################################################
 # OPTIMIZE AND PRINT RESULTS
@@ -185,7 +182,8 @@ print(f"Final loss={model.loss().item():.3e}")
 print(f"Elapsed time: {stop - start:.3f}s")
 print(f"No. of iterations: {optim.num_iter}")
 
-print(f"Estimated state-dependent birth rate: {bds.birth_log.exp()[0]: .3f}, {bds.birth_log.exp()[1]: .3f}")
-# print(f"Estimated state-dependent sampling rate: {bds.sampling_log.exp()[0]: .3f}, {bds.sampling_log.exp()[1]: .3f}")
-print(f"Estimated state-dependent sampling rate: {bds.sampling_log.exp().item(): .3f}")
+print(f"Estimated state-dependent birth rate: {bds.birth()[0]: .3f}, {bds.birth()[1]: .3f}")
+print(f"Estimated state-dependent sampling rate: {bds.sampling()[0]: .3f}")
 
+
+# %%
