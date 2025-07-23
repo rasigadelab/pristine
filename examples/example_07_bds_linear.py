@@ -2,6 +2,7 @@
 import sys; import os; sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import torch
 import torch.nn.functional as F
+import math
 """
 Linear model state-dependent BDS.
 """
@@ -30,8 +31,8 @@ class StatefulBDSSimulationVisitor:
     """
     def __init__(self, seq_visitor: SequenceSimulationVisitor):
         self.seq_visitor: SequenceSimulationVisitor = seq_visitor
-        self.birth_intercept = 3.0
-        self.birth_coeff = [-1.5, +2.0]
+        self.birth_intercept = 2.
+        self.birth_coeff = [-1., +1.]
 
     # Signature must be enforced
     def visit(self, node: BinaryTreeNode)->None:
@@ -46,10 +47,12 @@ class StatefulBDSSimulationVisitor:
         # State-dependent parameters
         states = node.data.state_indices().tolist()
 
-        node.data.birth_rate = \
-            self.birth_intercept + \
-            self.birth_coeff[0] * states[0] + \
+        node.data.birth_rate = math.exp(
+            self.birth_intercept + 
+            self.birth_coeff[0] * states[0] +
             self.birth_coeff[1] * states[1]
+            )
+        node.data.death_rate = 0.0
         node.data.sampling_rate = 0.5
 
 # Generate a random 2-state GTR model
@@ -142,7 +145,7 @@ print(f"Final loss={model.loss().item():.3e}")
 print(f"Elapsed time: {stop - start:.3f}s")
 print(f"No. of iterations: {optim.num_iter}")
 
-print(f"Estimated sampling rate: {bds.sampling_log.exp().item(): .3f}")
+print(f"Estimated sampling rate: {bds.sampling().item(): .3f}")
 print(f"Estimated birth intercept: {bds.intercept.item(): .3f}")
 print(f"Estimated beta_0: {bds.coeffs[0].item(): .3f}, beta_1: {bds.coeffs[1].item(): .3f}")
 

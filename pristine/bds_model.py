@@ -375,17 +375,17 @@ class StateDependentBirthDeathSampling:
         weighted_qmat_rowsumlogs = weighted_qmat.sum(-1).log()
         bds_log_likelihood = weighted_qmat_rowsumlogs
         return bds_log_likelihood
-    
+
 @torch.jit.script
 class LinearMarkerBirthModel:
     """
-    Birth-death-sampling model with birth rate modeled as a linear function
-    of marker posterior probabilities, using K-1 coefficients per marker
-    (state 0 is the reference).
+    Birth-death-sampling model where the *log birth rate* is modeled as a
+    linear function of marker posterior probabilities, using K-1 coefficients
+    per marker (state 0 is the reference).
 
     Attributes:
-        intercept (Tensor): scalar intercept term.
-        coeffs (Tensor): shape (L, K-1), coefficients for each marker and non-reference state.
+        intercept (Tensor): scalar intercept term (on log scale).
+        coeffs (Tensor): shape (L, K-1), linear weights on log scale.
         death_log (Tensor): log-death rate (scalar).
         sampling_log (Tensor): log-sampling rate (scalar).
     """
@@ -396,49 +396,47 @@ class LinearMarkerBirthModel:
 
         self.treecal: TreeTimeCalibrator = treecal
         self.ancestor_states: torch.Tensor = ancestor_states
-        self.intercept: torch.Tensor = torch.tensor(1.).requires_grad_(True)
+        self.intercept: torch.Tensor = torch.tensor(0.).requires_grad_(True)
         self.num_markers: int = ancestor_states.shape[1]
         self.num_states: int = ancestor_states.shape[2]
-        self.coeffs: torch.Tensor = torch.zeros([self.num_markers, self.num_states-1]).requires_grad_(True)        # (L, K-1)
-        self.death_log: torch.Tensor = torch.tensor(float('-inf'))
+        self.coeffs: torch.Tensor = torch.zeros([self.num_markers, self.num_states - 1]).requires_grad_(True)
+        self.death_log: torch.Tensor = torch.tensor(float('-inf'))  # death = 0
         self.sampling_log: torch.Tensor = torch.tensor(0.).requires_grad_(True)
 
-    def log_likelihood(self
-                      ) -> torch.Tensor:
+    def death(self)->torch.Tensor:
+        return self.death_log.exp()
+
+    def sampling(self)->torch.Tensor:
+        return self.sampling_log.exp() 
+    
+    def log_likelihood(self) -> torch.Tensor:
         """
-        Compute log-likelihood under BDS with linear birth model.
-
-        Args:
-            treecal: calibrated tree structure
-            ancestor_states: tensor of shape (N, M, K) with marker posteriors
-
-        Returns:
-            log-likelihood scalar
+        Compute log-likelihood under BDS with log-linear birth model.
+        Birth rate is modeled as: log(λ_i) = intercept + Σ (w_mk · prob_mk)
         """
-        # Step 1: Compute expected birth rate at each node
-        probs_nonref = self.ancestor_states[:, :, 1:].clone()  # (N, L, K-1)
-        birth_expect = self.intercept + torch.einsum("nmk,mk->n", probs_nonref, self.coeffs)  # (N,)
-        birth_expect = torch.clamp(birth_expect, min=1e-8)  # Ensure positivity
+        # Step 1: Compute expected *log* birth rate at each node
+        probs_nonref = self.ancestor_states[:, :, 1:].clone()  # shape (N, L, K-1)
+        log_birth_expect = self.intercept + torch.einsum("nmk,mk->n", probs_nonref, self.coeffs)  # (N,)
+        birth_expect = log_birth_expect.exp()  # (N,)
 
-        # Step 2: Constant death/sampling (scalar)
-        death = self.death_log.exp()
-        sampling = self.sampling_log.exp()
+        # Step 2: Constants
+        death = self.death()
+        sampling = self.sampling()
 
-        # Step 3: Use parent's birth rate for q-ratio computation
-        ages = self.treecal.ages()  # (N,)
+        # Step 3: Parent birth rates on edges
         parent_birth = birth_expect[self.treecal.parents]  # (E,)
+        ages = self.treecal.ages()
         q_parent = stadler_q_general(ages[self.treecal.parents], parent_birth, death, sampling)
         q_child = stadler_q_general(ages[self.treecal.children], parent_birth, death, sampling)
-        q_ratio = q_child / q_parent  # (E,)
+        q_ratio = q_child / q_parent
 
-        # Step 4: Likelihood components
+        # Step 4: Log-likelihood
         logL = (
-              torch.log(q_ratio).sum() 
-            + self.treecal.nnodes() * torch.log(parent_birth).sum() / parent_birth.numel()
+              torch.log(q_ratio).sum()
+            + self.treecal.nnodes() * log_birth_expect[self.treecal.parents].sum() / parent_birth.numel()
             + self.treecal.ntips() * self.sampling_log
         )
         return logL
-
 
 @torch.jit.script
 class RelaxedBirthModel:
