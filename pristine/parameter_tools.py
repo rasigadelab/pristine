@@ -204,7 +204,9 @@ class ParameterTools:
         match = re.match(r"^(.*)\[(\d+)\]$", name)
         if match:
             return match.group(1), int(match.group(2))
-        # param = dict(self.named_params).get(name, None)
-        # if param is not None and param.ndim == 0:
-        #     return name, None
         return name, None
+    
+    def get_accessor(self, name: str)->TensorAccessor:
+        base, idx = self.parse_name(name)
+        param = dict(self.named_params)[base]
+        return TensorAccessor(param, idx)

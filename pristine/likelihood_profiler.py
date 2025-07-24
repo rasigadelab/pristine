@@ -62,37 +62,13 @@ class LikelihoodProfiler:
     """
     Refines confidence intervals using likelihood profiling.
     """
-    def __init__(self, model, name_with_index: str = None):
+    def __init__(self, model):
         self.model = model
         self.pt = ParameterTools(model)
-        self.grid_points = 21
-
-        if name_with_index is not None:
-            resolved_name = self.pt.normalize_name(name_with_index)
-            self.name = resolved_name
-            indexed_name = self.pt.normalize_name(resolved_name)
-            self.name = indexed_name
-            self.index = self.pt.get_named_index(indexed_name)
-
-            self.param_tensor = None
-            self.tensor_idx = None
-            self._resolve_tensor()
-            self.accessor = TensorAccessor(self.param_tensor, self.tensor_idx)
-        else:
-            self.name = None
-            self.index = None
-            self.param_tensor = None
-            self.tensor_idx = None
-            self.accessor = None
-
-    def _resolve_tensor(self):
-        """
-        Store the actual tensor and the local index for the named parameter.
-        """
-        name = self.name.split("[")[0]
-        self.param_tensor = dict(self.pt.named_params)[name]
-        idx_match = torch.tensor(eval(self.name[self.name.index("["):]))  # parse [3] or [1,2]
-        self.tensor_idx = tuple(idx_match.tolist()) if idx_match.ndim > 0 else int(idx_match)
+        self.range_factor: float = 2
+        self.reoptimize: bool = True
+        self.max_expand: int = 8
+        self.max_workers: int = 16
 
     def _copy_model(self):
         """
@@ -100,241 +76,10 @@ class LikelihoodProfiler:
         """
         return copy.deepcopy(self.model)
 
-    def set_target_parameter(self, name_with_index: str):
-        """
-        Set the parameter to profile after construction.
-        Allows switching parameters interactively.
-        """
-        resolved = self.pt.normalize_name(name_with_index)
-        self.name = resolved
-        self.index = self.pt.get_named_index(resolved)
+    ############################################################################
+    # BRACKETING LIKELIHOOD PROFILING
+    ############################################################################
 
-        base = self.name.split("[")[0]
-        self.param_tensor = dict(self.pt.named_params)[base]
-        idx_match = torch.tensor(eval(self.name[self.name.index("["):]))
-        self.tensor_idx = tuple(idx_match.tolist()) if idx_match.ndim > 0 else int(idx_match)
-        self.accessor = TensorAccessor(self.param_tensor, self.tensor_idx)
-
-    def profile_DEPREC(self, range_factor: float = 2.0, tol: float = 1.92) -> Tuple[List[float], List[float]]:
-        """
-        Estimate lower and upper bound for a 95% CI by profiling log-likelihood.
-        """
-        # Step 1: Estimate MLE and CI from Laplace
-        lap = LaplaceEstimator(self.model)
-        center = self.accessor.get()
-        stddev = lap.estim_variance_by_name(self.name).sqrt().item()
-        span = stddev * range_factor
-        profile_points = torch.linspace(center - span, center + span, steps=self.grid_points)
-
-        # Step 2: Evaluate profile likelihoods
-        ll_center = self.model.loss().item()
-        log_likelihoods = []
-
-        for v in profile_points:
-            model_copy = self._copy_model()
-            profiler = LikelihoodProfiler(model_copy, self.name)
-            profiler.accessor.set(v)
-            optimizer = Optimizer(model_copy)
-            optimizer.optimize()
-            profiler.accessor.zero_grad()
-            log_likelihoods.append(model_copy.loss().item())
-
-        # Step 3: Determine bounds from likelihood threshold
-        diffs = [ll - ll_center for ll in log_likelihoods]
-        lower = upper = center
-
-        for x, d in zip(profile_points, diffs):
-            if d < tol and x < center:
-                lower = x.item()
-            if d < tol and x > center:
-                upper = x.item()
-
-        return lower, upper
-
-    def estimate_confint(self, confidence_level=0.95, range_factor=3.0) -> Tuple[float, float]:
-        """
-        Estimate confidence interval using likelihood profiling.
-        Falls back to Laplace approximation if profiling fails.
-
-        Parameters:
-        - confidence_level: confidence level for the interval (default 0.95)
-        - num_points: number of profiling points to try
-        - range_factor: span in stddev units to explore
-        """
-        if self.name is None:
-            first_param, _ = self.pt.named_params[0]
-            self.set_target_parameter(f"{first_param}[0]")
-            warnings.warn(f"[Info] No parameter name provided. Defaulting to first parameter: {self.name}")
-        
-        # For profiling: use chi-square threshold for 1 DOF
-        chi2_threshold = stats.chi2.ppf(confidence_level, df=1)
-        delta_logL = 0.5 * chi2_threshold
-
-        try:
-            lower, upper = self.profile_brent(
-                range_factor=range_factor,
-                tol=delta_logL
-            )
-
-            if lower == upper:
-                raise RuntimeError("Profile bounds did not diverge from center.")
-
-            return lower, upper
-
-        except Exception as e:
-            warnings.warn(f"[Fallback] Likelihood profiling failed: {str(e)}\n"
-                          f"Returning Laplace-based symmetric interval.")
-
-            from .laplace_estimator import LaplaceEstimator
-            lap = LaplaceEstimator(self.model)
-            center = self.accessor.get()
-            std = lap.estim_variance_by_name(self.name).sqrt().item()
-            z_score = stats.norm.ppf(0.5 + confidence_level / 2)
-            delta = z_score * std
-            return center - delta, center + delta
-
-    def estimate_confint_all(self, names: List[str] = None, confidence_level=0.95,
-                              range_factor=3.0) -> pd.DataFrame:
-        """
-        Estimate confidence intervals via profiling for multiple parameters.
-
-        Returns a DataFrame with columns:
-            name | center | lower | upper | width | used_fallback
-        """
-        if names is None:
-            names = self.pt.get_indexed_names()
-
-        records = []
-        for name in names:
-            print(f"\nProfiling: {name}")
-            model_copy = copy.deepcopy(self.model)
-            profiler = LikelihoodProfiler(model_copy, name)
-            center = profiler.accessor.get()
-            try:
-                ci_low, ci_high = profiler.estimate_confint(
-                    confidence_level=confidence_level,
-                    range_factor=range_factor
-                )
-                used_fallback = False
-            except Exception as e:
-                warnings.warn(f"[Fallback] {name}: {e}")
-                from .laplace_estimator import LaplaceEstimator
-                lap = LaplaceEstimator(profiler.model)
-                var = lap.estim_variance_by_name(name)
-                if not torch.is_tensor(var):
-                    var = torch.tensor(var)
-                std = var.sqrt().item()
-                from scipy.stats import norm
-                z = norm.ppf(0.5 + confidence_level / 2)
-                delta = z * std
-                ci_low, ci_high = center - delta, center + delta
-                used_fallback = True
-
-            records.append({
-                "name": name,
-                "lower": ci_low,
-                "center": center,
-                "upper": ci_high,
-                "used_fallback": used_fallback
-            })
-
-        return pd.DataFrame(records)
-
-    def estimate_confint_all_parallel(self, names: List[str] = None, confidence_level=0.95,
-                                    range_factor=3.0, max_workers: int = 16) -> pd.DataFrame:
-        """
-        Parallelized version of estimate_confint_all using ThreadPoolExecutor.
-
-        Parameters:
-            names (List[str]): List of parameter names (e.g. 'clock.log_rate[0]').
-            confidence_level (float): Confidence level for intervals.
-            range_factor (float): Range in stddev units for profiling.
-            max_workers (int): Number of threads.
-
-        Returns:
-            pd.DataFrame with columns: name | lower | center | upper | laplace
-        """
-        if names is None:
-            names = self.pt.get_indexed_names()
-
-        def profile_one(name: str) -> dict:
-            model_copy = self._copy_model()
-            profiler = LikelihoodProfiler(model_copy, name)
-            center = profiler.accessor.get()
-            try:
-                ci_low, ci_high = profiler.estimate_confint(
-                    confidence_level=confidence_level,
-                    range_factor=range_factor
-                )
-                used_fallback = False
-            except Exception as e:
-                from .laplace_estimator import LaplaceEstimator
-                lap = LaplaceEstimator(profiler.model)
-                var = lap.estim_variance_by_name(name)
-                std = torch.tensor(var).sqrt().item()
-                from scipy.stats import norm
-                z = norm.ppf(0.5 + confidence_level / 2)
-                delta = z * std
-                ci_low, ci_high = center - delta, center + delta
-                used_fallback = True
-            return {
-                "name": name,
-                "lower": ci_low,
-                "center": center,
-                "upper": ci_high,
-                "laplace": used_fallback
-            }
-
-        records = []
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(profile_one, name): name for name in names}
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Profiling"):
-                records.append(future.result())
-
-        df = pd.DataFrame(records)
-        df['order'] = df['name'].map({name: i for i, name in enumerate(names)})
-        return df.sort_values("order").drop(columns="order").reset_index(drop=True)
-
-    def estimate_confint_all_laplace(self, confidence_level=0.95, dense: bool = True, num_samples = 20) -> pd.DataFrame:
-        """
-        Compute confidence intervals using the Laplace approximation
-        via the full dense inverse Hessian (high accuracy, complexity O(n^3)).
-        
-        Parameters:
-            confidence_level: confidence level (default 0.95)
-            dense:  if True (default), use full dense Hessian inverse (accurate, slower); 
-                    if False, use Hutchinson estimator (faster, approximate)       
-        Returns:
-            pd.DataFrame with columns: name | lower | center | upper | laplace
-        """
-
-        lap = LaplaceEstimator(self.model)
-        lap.dense = dense  # Force dense Hessian inversion
-        lap.hutchinson_num_samples = num_samples
-        variances = lap.estim_all_variances_dict()
-        pt = ParameterTools(self.model)
-
-        z_score = norm.ppf(0.5 + confidence_level / 2)
-
-        records = []
-        for name, tensor in pt.named_params:
-            center_vals = tensor.detach().view(-1)
-            stddev_vals = variances[name].sqrt().view(-1)
-            for i in range(center_vals.numel()):
-                param_name = f"{name}[{i}]"
-                center = center_vals[i].item()
-                std = stddev_vals[i].item()
-                delta = z_score * std
-                records.append({
-                    "name": param_name,
-                    "lower": center - delta,
-                    "center": center,
-                    "upper": center + delta,
-                    "laplace": True  # Always fallback, no profiling
-                })
-
-        return pd.DataFrame(records)
-    
     @staticmethod
     def optimize_with_fixed_parameters(model: object,
                                     fixed_params: List[Tuple[str, float]],
@@ -384,9 +129,7 @@ class LikelihoodProfiler:
         return model.loss().item()
     
 
-    def profile_brent(self, reoptimize: bool = True, 
-                      range_factor: float = 2.0, tol: float = 1.92,
-                      max_expand: int = 8) -> Tuple[float, float]:
+    def profile_brent(self, name: str, tol: float = 1.92) -> Tuple[float, float]:
         """
         Estimate a confidence interval for a scalar parameter using likelihood profiling
         and Brent's root-finding method.
@@ -419,24 +162,23 @@ class LikelihoodProfiler:
             - This method assumes the model defines a `.loss()` method returning
             the negative log-likelihood, and uses a Laplace approximation to estimate
             the standard deviation of the target parameter.
-            - Use `.set_target_parameter(name)` before calling this method to specify
-            which parameter to profile.
         """
         # Step 1: Get MLE point and stddev from Laplace
         lap = LaplaceEstimator(self.model)
-        center = self.accessor.get()
-        stddev = lap.estim_variance_by_name(self.name).sqrt().item()
-        span = stddev * range_factor
+        # center = self.accessor.get()
+        center = self.pt.get_accessor(name).get()
+        stddev = lap.estim_variance_by_name(name).sqrt().item()
+        span = stddev * self.range_factor
         loss_mle = self.model.loss().item()
 
         # Define objective: zero when loss crosses the profiling threshold
         def loss_diff(value: float) -> float:
-            fixed = [(self.name, value)]
+            fixed = [(name, value)]
             modcopy = copy.deepcopy(self.model)
             loss = LikelihoodProfiler.optimize_with_fixed_parameters(
                 modcopy,
                 fixed_params=fixed,
-                reoptimize=reoptimize,
+                reoptimize=self.reoptimize,
                 optimizer_args={"initial_lr": 0.1, "max_iterations": 500}
             )
             return loss - loss_mle - tol
@@ -445,7 +187,7 @@ class LikelihoodProfiler:
             sign = -1.0 if direction == "lower" else 1.0
             a = center
             b = center + sign * span
-            for i in range(max_expand):
+            for i in range(self.max_expand):
                 fa = loss_diff(a)
                 fb = loss_diff(b)
                 if fa * fb < 0:
@@ -458,3 +200,187 @@ class LikelihoodProfiler:
         lower = find_bound("lower")
         upper = find_bound("upper")
         return lower, upper
+
+    @staticmethod
+    def get_delta_log_likelihood(confidence_level=0.95, dof=1)->float:
+        # For profiling: use chi-square threshold
+        chi2_threshold = stats.chi2.ppf(confidence_level, df=1)
+        delta_logL = 0.5 * chi2_threshold
+        return delta_logL
+
+    def estimate_confint(self, name: str, confidence_level=0.95) -> Tuple[float, float]:
+        """
+        Estimate confidence interval using likelihood profiling.
+        Falls back to Laplace approximation if profiling fails.
+
+        Parameters:
+        - confidence_level: confidence level for the interval (default 0.95)
+        """
+        
+        # For profiling: use chi-square threshold for 1 DOF
+        delta_logL = LikelihoodProfiler.get_delta_log_likelihood(
+            confidence_level=confidence_level, dof=1)
+
+        try:
+            lower, upper = self.profile_brent(
+                name=name,
+                tol=delta_logL
+            )
+
+            if lower == upper:
+                raise RuntimeError("Profile bounds did not diverge from center.")
+
+            return lower, upper
+
+        except Exception as e:
+            warnings.warn(f"[Fallback] Likelihood profiling failed: {str(e)}\n"
+                          f"Returning Laplace-based symmetric interval.")
+
+            from .laplace_estimator import LaplaceEstimator
+            lap = LaplaceEstimator(self.model)
+            center = self.pt.get_accessor(name).get()
+            std = lap.estim_variance_by_name(name).sqrt().item()
+            z_score = stats.norm.ppf(0.5 + confidence_level / 2)
+            delta = z_score * std
+            return center - delta, center + delta
+
+    def estimate_confint_all(self, names: List[str] = None, confidence_level=0.95) -> pd.DataFrame:
+        """
+        Estimate confidence intervals via profiling for multiple parameters.
+
+        Returns a DataFrame with columns:
+            name | center | lower | upper | width | used_fallback
+        """
+        if names is None:
+            names = self.pt.get_indexed_names()
+
+        records = []
+        for name in names:
+            print(f"\nProfiling: {name}")
+            model_copy = copy.deepcopy(self.model)
+            profiler = LikelihoodProfiler(model_copy)
+            center = profiler.pt.get_accessor(name).get()
+            try:
+                ci_low, ci_high = profiler.estimate_confint(
+                    name=name,
+                    confidence_level=confidence_level
+                )
+                used_fallback = False
+            except Exception as e:
+                warnings.warn(f"[Fallback] {name}: {e}")
+                from .laplace_estimator import LaplaceEstimator
+                lap = LaplaceEstimator(profiler.model)
+                var = lap.estim_variance_by_name(name)
+                if not torch.is_tensor(var):
+                    var = torch.tensor(var)
+                std = var.sqrt().item()
+                from scipy.stats import norm
+                z = norm.ppf(0.5 + confidence_level / 2)
+                delta = z * std
+                ci_low, ci_high = center - delta, center + delta
+                used_fallback = True
+
+            records.append({
+                "name": name,
+                "lower": ci_low,
+                "center": center,
+                "upper": ci_high,
+                "used_fallback": used_fallback
+            })
+
+        return pd.DataFrame(records)
+
+    def estimate_confint_all_parallel(self, names: List[str] = None, confidence_level=0.95) -> pd.DataFrame:
+        """
+        Parallelized version of estimate_confint_all using ThreadPoolExecutor.
+
+        Parameters:
+            names (List[str]): List of parameter names (e.g. 'clock.log_rate[0]').
+            confidence_level (float): Confidence level for intervals.
+            range_factor (float): Range in stddev units for profiling.
+            max_workers (int): Number of threads.
+
+        Returns:
+            pd.DataFrame with columns: name | lower | center | upper | laplace
+        """
+        if names is None:
+            names = self.pt.get_indexed_names()
+
+        def profile_one(name: str) -> dict:
+            model_copy = self._copy_model()
+            profiler = LikelihoodProfiler(model_copy)
+            center = profiler.pt.get_accessor(name).get()
+            try:
+                ci_low, ci_high = profiler.estimate_confint(
+                    name=name,
+                    confidence_level=confidence_level
+                )
+                used_fallback = False
+            except Exception as e:
+                from .laplace_estimator import LaplaceEstimator
+                lap = LaplaceEstimator(profiler.model)
+                var = lap.estim_variance_by_name(name)
+                std = torch.tensor(var).sqrt().item()
+                from scipy.stats import norm
+                z = norm.ppf(0.5 + confidence_level / 2)
+                delta = z * std
+                ci_low, ci_high = center - delta, center + delta
+                used_fallback = True
+            return {
+                "name": name,
+                "lower": ci_low,
+                "center": center,
+                "upper": ci_high,
+                "laplace": used_fallback
+            }
+
+        records = []
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = {executor.submit(profile_one, name): name for name in names}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Profiling"):
+                records.append(future.result())
+
+        df = pd.DataFrame(records)
+        df['order'] = df['name'].map({name: i for i, name in enumerate(names)})
+        return df.sort_values("order").drop(columns="order").reset_index(drop=True)
+
+    def estimate_confint_all_laplace(self, confidence_level=0.95, dense: bool = True, num_samples = 20) -> pd.DataFrame:
+        """
+        Compute confidence intervals using the Laplace approximation
+        via the full dense inverse Hessian (high accuracy, complexity O(n^3)).
+        
+        Parameters:
+            confidence_level: confidence level (default 0.95)
+            dense:  if True (default), use full dense Hessian inverse (accurate, slower); 
+                    if False, use Hutchinson estimator (faster, approximate)       
+        Returns:
+            pd.DataFrame with columns: name | lower | center | upper | laplace
+        """
+
+        lap = LaplaceEstimator(self.model)
+        lap.dense = dense  # Force dense Hessian inversion
+        lap.hutchinson_num_samples = num_samples
+        variances = lap.estim_all_variances_dict()
+        pt = ParameterTools(self.model)
+
+        z_score = norm.ppf(0.5 + confidence_level / 2)
+
+        records = []
+        for name, tensor in pt.named_params:
+            center_vals = tensor.detach().view(-1)
+            stddev_vals = variances[name].sqrt().view(-1)
+            for i in range(center_vals.numel()):
+                param_name = f"{name}[{i}]"
+                center = center_vals[i].item()
+                std = stddev_vals[i].item()
+                delta = z_score * std
+                records.append({
+                    "name": param_name,
+                    "lower": center - delta,
+                    "center": center,
+                    "upper": center + delta,
+                    "laplace": True  # Always fallback, no profiling
+                })
+
+        return pd.DataFrame(records)
+    
