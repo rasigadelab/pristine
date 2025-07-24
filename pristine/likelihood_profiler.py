@@ -44,6 +44,7 @@ format suitable for downstream use.
 import torch
 import copy
 import warnings
+import math
 import scipy.stats as stats
 import pandas as pd
 from typing import Tuple, List
@@ -114,55 +115,7 @@ class LikelihoodProfiler:
         self.tensor_idx = tuple(idx_match.tolist()) if idx_match.ndim > 0 else int(idx_match)
         self.accessor = TensorAccessor(self.param_tensor, self.tensor_idx)
 
-    def profile__(self, range_factor: float = 2.0, tol: float = 1.92, maxiter: int = 20, max_expansions: int = 5) -> Tuple[float, float]:
-        """
-        Estimate lower and upper bound for a 95% CI by profiling log-likelihood using Brent's method.
-        If the root is not found in the initial bracket, the interval is doubled up to max_expansions times.
-        """
-        lap = LaplaceEstimator(self.model)
-        center = self.accessor.get()
-        stddev = lap.estim_variance_by_name(self.name).sqrt().item()
-        ll_center = self.model.loss().item()
-
-        def make_objective():
-            def objective(v):
-                model_copy = self._copy_model()
-                profiler = LikelihoodProfiler(model_copy, self.name)
-                profiler.accessor.set(v)
-                optimizer = Optimizer(model_copy)
-                optimizer.optimize()
-                profiler.accessor.zero_grad()
-                ll = model_copy.loss().item()
-                return ll - (ll_center + tol)
-            return objective
-
-        def search_bound(side: str) -> float:
-            """
-            Attempts to find the bound (lower or upper) using Brent's method.
-            Expands the bracket adaptively if necessary.
-            """
-            direction = -1 if side == "lower" else 1
-            span = stddev * range_factor
-            objective = make_objective()
-
-            for i in range(max_expansions):
-                a = center + direction * span
-                b = center
-                bracket = (a, b) if side == "lower" else (b, a)
-
-                try:
-                    return brentq(objective, *bracket, maxiter=maxiter)
-                except ValueError:
-                    span *= 2  # Expand bracket and retry
-
-            warnings.warn(f"{side.capitalize()} bound: bracketing failed after {max_expansions} expansions.")
-            return center  # Fallback: return center if all attempts fail
-
-        lower = search_bound("lower")
-        upper = search_bound("upper")
-        return lower, upper
-
-    def profile(self, range_factor: float = 2.0, tol: float = 1.92) -> Tuple[List[float], List[float]]:
+    def profile_DEPREC(self, range_factor: float = 2.0, tol: float = 1.92) -> Tuple[List[float], List[float]]:
         """
         Estimate lower and upper bound for a 95% CI by profiling log-likelihood.
         """
@@ -218,8 +171,7 @@ class LikelihoodProfiler:
         delta_logL = 0.5 * chi2_threshold
 
         try:
-            lower, upper = self.profile(
-                # num_points=num_points,
+            lower, upper = self.profile_brent(
                 range_factor=range_factor,
                 tol=delta_logL
             )
@@ -250,13 +202,7 @@ class LikelihoodProfiler:
             name | center | lower | upper | width | used_fallback
         """
         if names is None:
-            names = []
-            for pname, tensor in self.pt.named_params:
-                if tensor.ndim == 0:
-                    names.append(f"{pname}[0]")
-                else:
-                    for i in range(tensor.numel()):
-                        names.append(f"{pname}[{i}]")
+            names = self.pt.get_indexed_names()
 
         records = []
         for name in names:
@@ -309,13 +255,7 @@ class LikelihoodProfiler:
             pd.DataFrame with columns: name | lower | center | upper | laplace
         """
         if names is None:
-            names = []
-            for pname, tensor in self.pt.named_params:
-                if tensor.ndim == 0:
-                    names.append(f"{pname}[0]")
-                else:
-                    for i in range(tensor.numel()):
-                        names.append(f"{pname}[{i}]")
+            names = self.pt.get_indexed_names()
 
         def profile_one(name: str) -> dict:
             model_copy = self._copy_model()
@@ -394,3 +334,127 @@ class LikelihoodProfiler:
                 })
 
         return pd.DataFrame(records)
+    
+    @staticmethod
+    def optimize_with_fixed_parameters(model: object,
+                                    fixed_params: List[Tuple[str, float]],
+                                    reoptimize: bool = True,
+                                    optimizer_args: dict = None
+                                    ) -> Tuple[object, float]:
+        """
+        Fix specified parameters, optionally optimize all others, and return loss.
+        Model is modified, use a deep-copy if required.
+
+        Args:
+            model: A model object with a .loss() method and optimizable parameters.
+            fixed_params: A list of (name_with_index, value) to fix.
+                        E.g., [("substitution_model.rates_log[0]", 1.0)]
+            reoptimize: optimize the remaining free parameters (likelihood profiling)
+            optimizer_args: Optional dict passed to Optimizer constructor. Ignored if
+                reoptimize is False
+
+        Returns:
+            final_loss_value
+        """
+        # model_copy = copy.deepcopy(model)
+        pt = ParameterTools(model)
+
+        # Fix the parameters by disabling gradient and setting value
+        for name, value in fixed_params:
+            base, idx = pt.parse_name(name)
+            param = dict(pt.named_params)[base]
+            accessor = TensorAccessor(param, idx)
+            accessor.set(value)
+
+            if param.requires_grad and reoptimize is True:
+                if idx is None or param.ndim == 0: # Scalar or full tensor
+                    param.requires_grad_(False)
+                else:
+                    def hook(grad):
+                            grad = grad.clone()
+                            grad[idx] = 0.0
+                            return grad
+                    param.register_hook(hook)
+
+        if reoptimize:
+            # Optimize the rest
+            opt = Optimizer(model, **(optimizer_args or {}))
+            opt.optimize()
+
+        return model.loss().item()
+    
+
+    def profile_brent(self, reoptimize: bool = True, 
+                      range_factor: float = 2.0, tol: float = 1.92,
+                      max_expand: int = 8) -> Tuple[float, float]:
+        """
+        Estimate a confidence interval for a scalar parameter using likelihood profiling
+        and Brent's root-finding method.
+
+        This method identifies the values of a target parameter at which the negative
+        log-likelihood increases by a specified threshold (`tol`) from its minimum.
+        It reoptimizes all other model parameters while keeping the target parameter fixed,
+        using Brent's algorithm to solve for the interval endpoints.
+
+        If the initial search bracket does not contain a root (i.e., the profile likelihood
+        does not cross the threshold), the bracket is expanded geometrically up to 
+        `max_expand` times. If no root is found, the corresponding bound is set to infinity.
+
+        Parameters:
+            reoptimize (bool): Whether to reoptimize other parameters at each fixed value
+                            of the profiled parameter. Should be True for valid profiling.
+            range_factor (float): Number of Laplace-based standard deviations to use for
+                                the initial search bracket around the MLE.
+            tol (float): The log-likelihood drop (Δℓ) defining the confidence bound.
+                        For a 95% CI, use 1.92 (≈0.5·χ²₀.₉₅,₁).
+            max_expand (int): Maximum number of bracket-doubling steps if the root is not
+                            bracketed initially.
+
+        Returns:
+            Tuple[float, float]: The lower and upper bounds of the confidence interval
+                                for the profiled parameter. If a bound could not be
+                                determined, it will be set to ±∞.
+
+        Notes:
+            - This method assumes the model defines a `.loss()` method returning
+            the negative log-likelihood, and uses a Laplace approximation to estimate
+            the standard deviation of the target parameter.
+            - Use `.set_target_parameter(name)` before calling this method to specify
+            which parameter to profile.
+        """
+        # Step 1: Get MLE point and stddev from Laplace
+        lap = LaplaceEstimator(self.model)
+        center = self.accessor.get()
+        stddev = lap.estim_variance_by_name(self.name).sqrt().item()
+        span = stddev * range_factor
+        loss_mle = self.model.loss().item()
+
+        # Define objective: zero when loss crosses the profiling threshold
+        def loss_diff(value: float) -> float:
+            fixed = [(self.name, value)]
+            modcopy = copy.deepcopy(self.model)
+            loss = LikelihoodProfiler.optimize_with_fixed_parameters(
+                modcopy,
+                fixed_params=fixed,
+                reoptimize=reoptimize,
+                optimizer_args={"initial_lr": 0.1, "max_iterations": 500}
+            )
+            return loss - loss_mle - tol
+
+        def find_bound(direction: str) -> float:
+            sign = -1.0 if direction == "lower" else 1.0
+            a = center
+            b = center + sign * span
+            for i in range(max_expand):
+                fa = loss_diff(a)
+                fb = loss_diff(b)
+                if fa * fb < 0:
+                    # Proper bracket found
+                    return brentq(loss_diff, a, b, xtol=1e-3)
+                # Expand the bracket
+                b = center + sign * (2 ** (i + 1)) * span
+            return float("inf") * sign
+
+        lower = find_bound("lower")
+        upper = find_bound("upper")
+        return lower, upper

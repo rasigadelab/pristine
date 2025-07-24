@@ -9,5 +9,8 @@
         "PATH": "C:\\Users\\JPR\\anaconda3\\Scripts;${env:PATH}"
     },
     "notebook.output.scrolling": true,
-    "notebook.output.wordWrap": true
+    "notebook.output.wordWrap": true,
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    "python-envs.pythonProjects": []
 }

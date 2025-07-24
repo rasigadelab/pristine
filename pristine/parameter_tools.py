@@ -171,6 +171,16 @@ class ParameterTools:
         Returns a list of (name, parameter) tuples.
         """
         return self.named_params
+ 
+    def get_indexed_names(self)->List[str]:
+        names = []
+        for pname, tensor in self.named_params:
+            if tensor.ndim == 0:
+                names.append(f"{pname}")
+            else:
+                for i in range(tensor.numel()):
+                    names.append(f"{pname}[{i}]")
+        return names
 
     def normalize_name(self, name: str) -> str:
         """
@@ -194,7 +204,7 @@ class ParameterTools:
         match = re.match(r"^(.*)\[(\d+)\]$", name)
         if match:
             return match.group(1), int(match.group(2))
-        param = dict(self.named_params).get(name, None)
-        if param is not None and param.ndim == 0:
-            return name, 0
+        # param = dict(self.named_params).get(name, None)
+        # if param is not None and param.ndim == 0:
+        #     return name, None
         return name, None

@@ -180,7 +180,7 @@ class ContinuousAdditiveRelaxedClock:
         )
 
 def new_continuous_additive_relaxed_clock(sequence_length: int):
-    torch_log_rate = torch.tensor(0.0, dtype = torch.float64, requires_grad=True)
-    torch_dispersion = torch.tensor(0.0, dtype = torch.float64, requires_grad=True)
+    torch_log_rate = torch.tensor(0.0, requires_grad=True)
+    torch_dispersion = torch.tensor(0.0, requires_grad=True)
     torch_sequence_length = torch.tensor(sequence_length)
     return ContinuousAdditiveRelaxedClock(log_rate=torch_log_rate, sequence_length=torch_sequence_length, dispersion=torch_dispersion)
