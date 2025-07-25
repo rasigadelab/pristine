@@ -306,6 +306,9 @@ class ConstantBirthDeathSamplingModel:
             - q_terms_log[self.treecal.node_indices].sum()
         )
     
+    def loss(self) -> torch.Tensor:
+        return -self.log_likelihood().sum()
+    
 @torch.jit.script
 class StateDependentBirthDeathSampling:
     """
@@ -313,10 +316,11 @@ class StateDependentBirthDeathSampling:
     """
     def __init__(self,
                  treecal: TreeTimeCalibrator,
-                 num_states: int
+                 ancestor_states: torch.Tensor
                  ):
         self.treecal: TreeTimeCalibrator = treecal
-        self.num_states: int = num_states
+        self.ancestor_states: torch.Tensor = ancestor_states
+        self.num_states: int = ancestor_states.shape[2]
         self.birth_log: torch.Tensor = torch.tensor(0.).requires_grad_(True)
         self.death_log: torch.Tensor = torch.tensor(float('-inf'))
         self.sampling_log: torch.Tensor = torch.tensor(0.).requires_grad_(True)
@@ -331,7 +335,7 @@ class StateDependentBirthDeathSampling:
     def sampling(self)->torch.Tensor:
         return self.sampling_log.exp().expand(self.num_states)
 
-    def log_likelihood(self, ancestor_states: torch.Tensor)->torch.Tensor:
+    def log_likelihood(self)->torch.Tensor:
 
         # Expand parameter vectors if required
         birth = self.birth()
@@ -349,7 +353,7 @@ class StateDependentBirthDeathSampling:
         with L=1 in our case. Leaving this 3D form will introduce subtle, silent bug so don't forget
         to call .squeeze(1).
         """
-        parent_state_prob = ancestor_states[self.treecal.parents].squeeze(1)
+        parent_state_prob = self.ancestor_states[self.treecal.parents].squeeze(1)
         """
         Event probabilities, as a [E, K] tensor with a row equal to 'sampling' if
         the edge child is a tip, or equal to 'birth' otherwise. FIXME this assumes that
@@ -375,6 +379,9 @@ class StateDependentBirthDeathSampling:
         weighted_qmat_rowsumlogs = weighted_qmat.sum(-1).log()
         bds_log_likelihood = weighted_qmat_rowsumlogs
         return bds_log_likelihood
+    
+    def loss(self) -> torch.Tensor:
+        return -self.log_likelihood().sum()
 
 #########################################################################
 # BIRTH-DEATH-SAMPLING, NODE-SPECIFIC BIRTH RATE
@@ -494,6 +501,9 @@ class LinearMarkerBirthModel:
         return per_parent_birth_log_likelihood(
             parent_log_birth_rate, self.treecal, self.log_death, self.log_sampling
         )
+    
+    def loss(self) -> torch.Tensor:
+        return -self.log_likelihood().sum()
 
 @torch.jit.script
 class RelaxedBirthModel:
@@ -564,5 +574,8 @@ class RelaxedBirthModel:
         return per_parent_birth_log_likelihood(
             parent_log_birth_rate, self.treecal, self.log_death, self.log_sampling
         )
+    
+    def loss(self) -> torch.Tensor:
+        return -self.log_likelihood().sum()
 
 

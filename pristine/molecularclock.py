@@ -61,9 +61,9 @@ where evolutionary rates vary stochastically across lineages.
 
 """
 import torch
-from typing import Optional
+from typing import Optional, Tuple
 from . import distribution as D
-
+from .edgelist import TreeTimeCalibrator
 
 #########################################################################
 # CONDITIONAL CLOCK MODEL
@@ -73,22 +73,25 @@ from . import distribution as D
 class ConditionalErrorClock:
     def __init__(
         self,
-        log_rate: torch.Tensor,
-        num_states: torch.Tensor,
-        sequence_length: torch.Tensor
+        treecal: TreeTimeCalibrator,
+        num_states: int,
+        sequence_length: float,
+        log_rate: Optional[torch.Tensor] = None
     ):
         """
         States and length are used as float in computations so we convert them
         once during initialization
         """
-        self.num_states: torch.Tensor = num_states
-        self.log_rate: torch.Tensor = log_rate
-        self.sequence_length: torch.Tensor = sequence_length
+        self.treecal: TreeTimeCalibrator = treecal
+        self.num_states: torch.Tensor = torch.tensor(num_states)
+        self.sequence_length: torch.Tensor = torch.tensor(sequence_length)
+        self.log_rate = log_rate if log_rate is not None else \
+            torch.tensor(0.).requires_grad_(True)
 
     def rate(self)->torch.Tensor:
         return self.log_rate.exp()
 
-    def log_likelihood(self, durations: torch.Tensor, distances: torch.Tensor)->torch.Tensor:
+    def log_likelihood(self)->torch.Tensor:
         r"""
         The log-likelihood of the waiting time l for a MLE of evolutionary distance (subt./site) d_hat
         estimated from a sequence of length L:
@@ -113,9 +116,10 @@ class ConditionalErrorClock:
         # Compute p(l) and p(d_hat)
         K = self.num_states
         L = self.sequence_length
-        scaled_durations = durations * self.log_rate.exp()
+        durations = self.treecal.durations()
+        scaled_durations = durations.clamp(1e-8) * self.log_rate.exp()
         p_durations = D.JC69_probability(scaled_durations, K)
-        p_distances = D.JC69_probability(distances, K)
+        p_distances = D.JC69_probability(self.treecal.distances, K)
 
         # Compute the log coefficient using lgamma (log Gamma)
         # Note: torch.lgamma(x) = log(Γ(x))
@@ -126,15 +130,12 @@ class ConditionalErrorClock:
         # Compute the log likelihood (each term is computed elementwise)
         loglik = log_coeff + L * p_distances * torch.log(p_durations) + L * (1.0 - p_distances) * torch.log(1.0 - p_durations)
         
-        return loglik
+        return loglik - D.barrier_positive(durations).sum()
+        
+    def loss(self) -> torch.Tensor:
+        return -self.log_likelihood().sum()
 
-def new_conditional_error_clock(num_states: float, sequence_length: float)->ConditionalErrorClock:
-    torch_log_rate = torch.tensor(0.0, requires_grad=True)
-    return ConditionalErrorClock(
-        log_rate=torch_log_rate,
-        num_states=torch.tensor(num_states), 
-        sequence_length=torch.tensor(sequence_length)
-    )
+
 
 #########################################################################
 # cARC MODEL
@@ -144,43 +145,45 @@ def new_conditional_error_clock(num_states: float, sequence_length: float)->Cond
 class ContinuousAdditiveRelaxedClock:
     def __init__(
         self,
-        log_rate: torch.Tensor,
-        sequence_length: Optional[torch.Tensor] = None,
+        treecal: TreeTimeCalibrator,
+        sequence_length: Optional[float] = None,
+        log_rate: Optional[torch.Tensor] = None,
         dispersion: Optional[torch.Tensor] = None
     ):
-        self.log_rate = log_rate
-        self.sequence_length = sequence_length if sequence_length is not None else torch.tensor(1.0)
-        self.dispersion = dispersion if dispersion is not None else torch.tensor(0.0)
-
+        self.treecal: TreeTimeCalibrator = treecal
+        self.sequence_length = sequence_length if sequence_length is not None else 1.0
+        self.log_rate = log_rate if log_rate is not None else \
+            torch.tensor(0.).requires_grad_(True)
+        self.dispersion = dispersion if dispersion is not None else \
+            torch.tensor(1.).requires_grad_(True)
+    
     def rate(self)->torch.Tensor:
         return self.log_rate.exp()
 
-    def _gamma_rate(self) -> torch.Tensor:
-        return 1.0 / (1.0 + self.dispersion)
+    def _gamma_shape_rate(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        rate = 1.0 / (1.0 + self.dispersion)
+        shape = self.rate() * self.sequence_length * self.treecal.durations() * rate
+        return shape, rate
 
-    def simulate(self, durations: torch.Tensor) -> torch.Tensor:
+    def simulate(self) -> torch.Tensor:
         """
         Simulate genetic distances under the continuous additive relaxed clock model.
         """
-        rate = self._gamma_rate()
-        shape = self.rate() * self.sequence_length * durations * rate
-        return torch._standard_gamma(shape) * rate / self.sequence_length
+        shape, rate = self._gamma_shape_rate()
+        self.treecal.distances = torch._standard_gamma(shape) / rate / self.sequence_length
+        return self.treecal.distances
 
-    def log_likelihood(self, durations: torch.Tensor, distances: torch.Tensor)->torch.Tensor:
+    def log_likelihood(self)->torch.Tensor:
         """
         Log-likelihood of durations and distances under the continuous additive relaxed clock model.
         """
-        rate = self._gamma_rate()
-        shape = self.rate() * self.sequence_length * durations * rate        
-        scaled_distances = distances * self.sequence_length
+        shape, rate = self._gamma_shape_rate()
+        scaled_distances = self.treecal.distances * self.sequence_length
 
         return (
             D.gamma_log_probability(scaled_distances, shape, rate) 
             - D.barrier_positive(shape)
         )
-
-def new_continuous_additive_relaxed_clock(sequence_length: int):
-    torch_log_rate = torch.tensor(0.0, requires_grad=True)
-    torch_dispersion = torch.tensor(0.0, requires_grad=True)
-    torch_sequence_length = torch.tensor(sequence_length)
-    return ContinuousAdditiveRelaxedClock(log_rate=torch_log_rate, sequence_length=torch_sequence_length, dispersion=torch_dispersion)
+        
+    def loss(self) -> torch.Tensor:
+        return -self.log_likelihood().sum()

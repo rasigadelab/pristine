@@ -128,9 +128,7 @@ class Model:
     def loss(self)->torch.Tensor:
 
         fpa_log_likelihood = self.fpa.log_likelihood().sum()
-        bds_log_likelihood = self.bds.log_likelihood(
-            ancestor_states=self.fpa.ancestor_states
-        ).sum()
+        bds_log_likelihood = self.bds.log_likelihood().sum()
 
         return -fpa_log_likelihood - bds_log_likelihood
     
@@ -158,7 +156,7 @@ gtr_optim.rates_log.requires_grad_(True)
 fpa = FelsensteinPruningAlgorithm(gtr_optim, markers, treecal)
 
 # BDS with a single sampling parameter
-bds = StateDependentBirthDeathSampling(treecal, num_states)
+bds = StateDependentBirthDeathSampling(treecal, fpa.ancestor_states)
 bds.birth_log = torch.zeros(num_states, requires_grad=True)
 
 #########################################################################

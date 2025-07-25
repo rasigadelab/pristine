@@ -30,23 +30,9 @@ visitor = SequenceSimulationVisitor(gtr, sequence_length)
 root.bfs(visitor)
        
 #########################################################################
-# MODEL ENERGY FUNCTION - FELSENSTEIN PRUNING ALGORITHM
+# PREPARE INITIAL GUESS - FELSENSTEIN PRUNING ALGORITHM
 #########################################################################
 from pristine.felsenstein import FelsensteinPruningAlgorithm
-
-class Model:
-    def __init__(self, 
-                 fpa: FelsensteinPruningAlgorithm
-                 ):
-        self.fpa: FelsensteinPruningAlgorithm = fpa
-
-    def loss(self)->torch.Tensor:
-        l = -self.fpa.log_likelihood().sum()
-        return l
-
-#########################################################################
-# PREPARE INITIAL GUESS
-#########################################################################
 from pristine.sequence import SequenceCollector, CollapsedConditionalLikelihood
 
 ### Collate unique sites into a sequence structure. Erase ancestor sequences
@@ -72,9 +58,9 @@ import time
 
 print("Site patterns:", torch.tensor(markers.unique_patterns.shape).tolist())
 
-model = Model(fpa=fpa)
-loss_init = model.loss().item()
-optim = pristine.optimize.Optimizer(model)
+# model = Model(fpa=fpa)
+loss_init = fpa.loss().item()
+optim = pristine.optimize.Optimizer(fpa)
 optim.print_interval = 10
 
 start = time.perf_counter()
@@ -83,18 +69,18 @@ stop = time.perf_counter()
 
 print("")
 print(f"Initial loss: {loss_init: .3e}")
-print(f"Final loss={model.loss().item():.3e}")
+print(f"Final loss={fpa.loss().item():.3e}")
 print(f"Elapsed time: {stop - start:.3f}s")
 print(f"No. of iterations: {optim.num_iter}")
 
 Q, pi = gtr.rate_matrix_stationary_dist()
 Q_hat, pi_hat = gtr_optim.rate_matrix_stationary_dist()
 
-print(pi.tolist())
-print(pi_hat.tolist())
+# print(pi.tolist())
+# print(pi_hat.tolist())
 
-print(Q)
-print(Q_hat)
+# print(Q)
+# print(Q_hat)
 
 from pristine.plot import plot_compare
 plot_compare(pi.tolist(), pi_hat.tolist(), "Steady state distribution")

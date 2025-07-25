@@ -33,32 +33,17 @@ gtr = GeneralizedTimeReversibleModel(num_states)
 gtr.rates_log -= 8.0 # Default rates are too fast, signal saturates
 
 # Prepare sequence simulation visitor and apply on all descendents of the root
-sequence_length = 10000
+sequence_length = 100000
 visitor = SequenceSimulationVisitor(gtr, sequence_length)
 root.bfs(visitor)
        
-#########################################################################
-# MODEL ENERGY FUNCTION - FELSENSTEIN PRUNING ALGORITHM
-#########################################################################
-from pristine.felsenstein import FelsensteinPruningAlgorithm
-
-class Model:
-    def __init__(self, 
-                 fpa: FelsensteinPruningAlgorithm
-                 ):
-        self.fpa: FelsensteinPruningAlgorithm = fpa
-
-    # @torch.compile
-    def loss(self)->torch.Tensor:
-        l = -self.fpa.log_likelihood().sum()
-        return l
-
 #########################################################################
 # PREPARE INITIAL GUESS INCLUDING AGES
 #########################################################################
 print("Preparing starting conditions...")
 from pristine.sequence import SequenceCollector, CollapsedConditionalLikelihood
 from pristine.edgelist import TreeTimeCalibrator
+from pristine.felsenstein import FelsensteinPruningAlgorithm
 
 ### Collate unique sites into a sequence structure. Erase ancestor sequences
 # to mimic application.
@@ -88,9 +73,8 @@ print("Launching optimizer...")
 import pristine.optimize
 import time
 
-model = Model(fpa=fpa)
-loss_init = model.loss().item()
-optim = pristine.optimize.Optimizer(model)
+loss_init = fpa.loss().item()
+optim = pristine.optimize.Optimizer(fpa)
 optim.print_interval = 10
 optim.max_iterations = 10000
 
@@ -100,18 +84,18 @@ stop = time.perf_counter()
 
 print("")
 print(f"Initial loss: {loss_init: .3e}")
-print(f"Final loss={model.loss().item():.3e}")
+print(f"Final loss={fpa.loss().item():.3e}")
 print(f"Elapsed time: {stop - start:.3f}s")
 print(f"No. of iterations: {optim.num_iter}")
 
 Q, pi = gtr.rate_matrix_stationary_dist()
 Q_hat, pi_hat = gtr_optim.rate_matrix_stationary_dist()
 
-print(pi.tolist())
-print(pi_hat.tolist())
+# print(pi.tolist())
+# print(pi_hat.tolist())
 
-print(Q)
-print(Q_hat)
+# print(Q)
+# print(Q_hat)
 
 from pristine.plot import plot_compare
 plot_compare(pi.tolist(), pi_hat.tolist(), "Steady state distribution")

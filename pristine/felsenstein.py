@@ -109,6 +109,7 @@ class FelsensteinPruningAlgorithm:
                  substitution_model: GeneralizedTimeReversibleModel, 
                  markers: CollapsedConditionalLikelihood,
                  treecal: TreeTimeCalibrator):
+        self.eps = 1e-16
         self.substitution_model: GeneralizedTimeReversibleModel = substitution_model
         self.markers: CollapsedConditionalLikelihood = markers
         self.ancestor_states: torch.Tensor = markers.unique_patterns.clone().detach()
@@ -116,7 +117,7 @@ class FelsensteinPruningAlgorithm:
         # Recursion object used for parallel FPA
         self.recursion_structure: List[List[torch.Tensor]] = get_postorder_edge_list(treecal)
 
-    def log_likelihood(self, eps: float=1e-16) -> torch.Tensor:                      # ── main entry
+    def log_likelihood(self) -> torch.Tensor:                      # ── main entry
         """
         Probability‑space Felsenstein pruning.
 
@@ -157,7 +158,7 @@ class FelsensteinPruningAlgorithm:
             msg_base    = torch.bmm(child_prob, P_edges.transpose(1, 2))        # (E,L,K)
 
             # True (unnormalised) message = msg_base * exp(log_scaling_child)
-            log_msg = msg_base.clamp_min(eps).log() +                           \
+            log_msg = msg_base.clamp_min(self.eps).log() +                           \
                     log_scaling[children].unsqueeze(-1)                       # (E,L,K)
 
             # ----- 2. accumulate log‑messages per parent -------------------
@@ -185,78 +186,13 @@ class FelsensteinPruningAlgorithm:
         # Likelihood at the root -------------------------------------------
         root_true   = node_probs[0] * log_scaling[0].exp().unsqueeze(-1)        # (L,K)
         pi          = self.substitution_model.stationary_dist()                # (K,)
-        site_like   = (root_true * pi).sum(dim=-1).clamp_min(eps)              # (L,)
+        site_like   = (root_true * pi).sum(dim=-1).clamp_min(self.eps)              # (L,)
         log_L_sites = site_like.log() + log_scaling[0]                         # (L,)
 
         # ------------------------------------------------------------------
         # Pattern weights  --------------------------------------------------
         log_likelihood = (log_L_sites * self.markers.pattern_counts).sum()
         return log_likelihood
-
-    def log_likelihood_logspace_(self, eps: float=1e-16):
-        """
-        Reference implementation in log space. Slightly less efficient than the 
-        probability space implementation above
-        """
-        # Sizes: N nodes, L sites, K states.
-        N, L, K = self.markers.unique_patterns.shape   
-
-        # Compute the matrix exponentials on each edge.
-        durations = self.treecal.durations().clamp(0.)
-        P_batch = self.substitution_model.compute_batch_matrix_exp(durations) # shape (E, K, K)
-
-        # We work in log–space. For tip nodes the CLs are one–hot vectors (so log is 0 or -inf),
-        # and for internal nodes they are ones (so log(1)=0). (Add eps to avoid log(0).)
-        log_node = (self.markers.unique_patterns + eps).log()
-        # Maintain a per–node, per–site accumulated scaling factor.
-        log_scaling = torch.zeros((N, L))
         
-        ###########################################################################
-        acc = torch.zeros((N, L, K))
-
-        # Process the tree level–by–level from the leaves upward.
-        for level in range(len(self.recursion_structure)):
-
-            edge_idx, parents, children = self.recursion_structure[level]
-
-            P_edges = P_batch[edge_idx]    # shape (num_edges_d, K, K)
-            
-            # Compute log-likelihood contributions for each edge in log-space:
-            # log_f[e, l, k] = logsumexp_j( log(CL_child[e, l, j]) + log(P_edge[e, k, j]) + log(scaling[e, l]) )
-            # Shapes: 
-            #   log_node[children]           → (E, L, K)
-            #   log_scaling[children]        → (E, L)
-            #   P_edges.transpose(1, 2)      → (E, K, K)
-            # Broadcasting aligns these to shape (E, L, K, K) before reduction over K.            
-            log_f = torch.logsumexp(
-                log_node[children].unsqueeze(-2) +                      # (E, L, 1, K)
-                log_scaling[children].unsqueeze(-1).unsqueeze(-1) +     # (E, L, 1, 1)
-                (P_edges.transpose(1, 2) + eps).log().unsqueeze(1),     # (E, 1, K, K)
-                dim=-1                                                  # Sum over child state
-            )  # → shape (E, L, K)
-
-            # Accumulate contributions for each parent 
-            acc.index_add_(0, parents, log_f)        
-
-            # Update each parent's log-likelihood and normalize
-            unique_parents = torch.unique(parents)
-            log_val = log_node[unique_parents] + acc[unique_parents]  # (num_parents, L, K)
-            norm = torch.logsumexp(log_val, dim=-1, keepdim=True)     # (num_parents, L, 1)
-            log_node.index_copy_(0, unique_parents, log_val - norm)
-            log_scaling.index_add_(0, unique_parents, norm.squeeze(-1))
-
-        # Write ancestor_states for use by other modules
-        self.ancestor_states[self.treecal.node_indices] = (
-            F.softmax(log_node[self.treecal.node_indices].detach(), dim = -1)
-        )
-
-        # --- Final likelihood at the root ---
-        # Recover the unscaled conditional likelihood at the root.
-        root_true = torch.exp(log_node[0]) * torch.exp(log_scaling[0]).unsqueeze(1)  # shape (L, K)
-        # Stationary distribution π.
-        pi = self.substitution_model.stationary_dist()
-        site_likelihood = (root_true * pi).sum(dim=1)  # shape (L,)
-
-        # Sum (in log) over sites to get the total log–likelihood.
-        log_likelihood = (torch.log(site_likelihood + eps) * self.markers.pattern_counts).sum()
-        return log_likelihood
+    def loss(self) -> torch.Tensor:
+        return -self.log_likelihood().sum()

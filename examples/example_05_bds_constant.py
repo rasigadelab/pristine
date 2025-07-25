@@ -33,25 +33,10 @@ root = bdsforward.simulate(n)
 root.visualize()
 
 #########################################################################
-# MODEL ENERGY FUNCTION - TREEWISE BDS
-#########################################################################
-
-from pristine.edgelist import TreeTimeCalibrator
-from pristine.bds_model import ConstantBirthDeathSamplingModel
-
-class Model:
-    def __init__(self, 
-                 bds: ConstantBirthDeathSamplingModel
-                 ):
-        self.bds: ConstantBirthDeathSamplingModel = bds
-
-    def loss(self):
-        return -self.bds.log_likelihood()
-
-#########################################################################
 # PREPARE INITIAL GUESS
 #########################################################################
-
+from pristine.edgelist import TreeTimeCalibrator
+from pristine.bds_model import ConstantBirthDeathSamplingModel
 treecal = root.edgelist().get_tree_time_calibrator_fixed()
 bds = ConstantBirthDeathSamplingModel(treecal)
 
@@ -62,9 +47,8 @@ bds = ConstantBirthDeathSamplingModel(treecal)
 import pristine.optimize
 import time
 
-model = Model(bds=bds)
-loss_init = model.loss().item()
-optim = pristine.optimize.Optimizer(model)
+loss_init = bds.loss().item()
+optim = pristine.optimize.Optimizer(bds)
 
 start = time.perf_counter()
 optim.optimize()
@@ -72,7 +56,7 @@ stop = time.perf_counter()
 
 print("")
 print(f"Initial loss: {loss_init: .3e}")
-print(f"Final loss={model.loss().item():.3e}")
+print(f"Final loss={bds.loss().item():.3e}")
 print(f"Elapsed time: {stop - start:.3f}s")
 
 print("")
