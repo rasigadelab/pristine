@@ -151,9 +151,9 @@ print(f"Estimated beta_0: {bds.coeffs[0].item(): .3f}, beta_1: {bds.coeffs[1].it
 
 #%%
 # Curvature report
-from pristine.laplace_estimator import LaplaceEstimator
+from pristine.hessian_tools import HessianTools
 
-laplace = LaplaceEstimator(model)
+laplace = HessianTools(model)
 laplace.curvature_report()
 
 # %%

@@ -56,9 +56,9 @@ from torch.autograd import grad
 from typing import List, Dict, Any, Tuple
 from .parameter_tools import ParameterTools
 
-class LaplaceEstimator:
+class HessianTools:
     """
-    Estimates confidence intervals using the Laplace approximation and the diagonal of the inverse Hessian.
+    Estimates parameter variance using the Laplace approximation and the diagonal of the inverse Hessian.
     Uses Hutchinson's method combined with conjugate gradient inversion of Hessian-vector products.
     """
 
@@ -178,11 +178,6 @@ class LaplaceEstimator:
         else:
             return self.estimate_inv_hessian_diag_hutchinson()
 
-    def estimate_inv_hessian_diag_dense(self) -> torch.Tensor:
-        H = self.compute_dense_hessian()
-        Hinv = torch.linalg.inv(H)
-        return Hinv.diag()
-
     def estimate_inv_hessian_diag_dense(self,
                                         lambda_max: float = 1.0,
                                         lambda_step: float = 0.05) -> torch.Tensor:
@@ -257,13 +252,6 @@ class LaplaceEstimator:
         variances = self.pt.unflatten_vector(diag_flat)
         return {name: var for (name, _), var in zip(self.pt.named_params, variances)}
 
-    def estim_all_confint_dict(self) -> Dict[str, torch.Tensor]:
-        """
-        Returns a dictionary mapping parameter names to 95% confidence interval half-widths.
-        """
-        var_dict = self.estim_all_variances_dict()
-        return {key: (var.sqrt() * 1.96) for key, var in var_dict.items()}
-
     def estim_variance_by_name(self, name: str) -> torch.Tensor:
         """
         Estimate Laplace variance for a full parameter (returns tensor) or a specific element (returns scalar tensor).
@@ -303,51 +291,9 @@ class LaplaceEstimator:
             param_tensor = dict(self.pt.named_params)[base]
             return torch.tensor(values, dtype=torch.float32, device=param_tensor.device).view(param_tensor.shape)
 
-    def estim_confint_by_name(self, name: str) -> torch.Tensor:
-        """
-        Estimate 95% confidence interval half-width for a full parameter or a single indexed element.
-        Always returns a torch.Tensor, even for scalars.
-        """
-        var = self.estim_variance_by_name(name)
-        return 1.96 * var.sqrt()
-
     ###############################################################################
-    # CURVATURE ANALYSIS
+    # EIGENANALYSIS
     ###############################################################################
-
-    """
-    In optimization and statistical inference, curvature analysis helps us understand how
-    sensitive the likelihood or loss function is to changes in the model parameters. This
-    sensitivity is captured by the second derivative of the loss, called the Hessian matrix.
-
-    The eigenvalues of the Hessian represent the curvature along specific directions in
-    parameter space. A large eigenvalue means the loss increases rapidly in that direction,
-    indicating a steep, well-constrained surface. A small eigenvalue means the loss changes
-    very little, even when moving far along that direction. This reveals a flat, poorly
-    identified, or redundant parameter combination.
-
-    By computing the smallest and largest eigenvalues of the Hessian, we can assess the
-    overall shape of the loss surface. The ratio of these two values is called the curvature
-    ratio or condition number. If this ratio is close to one, the surface is round and
-    well-behaved. If the ratio is very small—say, one millionth—it means there is a flat
-    valley where many different parameter settings give nearly the same likelihood.
-
-    Flat directions in the Hessian often signal non-identifiability. That is, the data do
-    not contain enough information to estimate some parameter combinations independently.
-    For example, if increasing one parameter has the same effect on the likelihood as
-    decreasing another, they are not separately identifiable.
-
-    To help interpret this, the curvature report prints both the smallest and largest
-    eigenvalues, the flatness ratio, and a classification: well-conditioned, mildly sloppy,
-    or severely non-identifiable. It also lists the most influential parameters in both the
-    flattest and steepest directions. This tells you which parameters are uncertain or
-    possibly redundant, and which ones are tightly constrained by the data.
-
-    Curvature analysis is not just a numerical tool; it gives insight into the structure of
-    your model. It reveals where the likelihood is informative and where it is indifferent.
-    This can guide reparameterization, regularization, or data collection strategies to
-    improve inference and interpretability.
-    """
 
     def extremal_eigenpair(self,
                         which: str = "smallest",  # "largest" or "smallest"
@@ -396,63 +342,3 @@ class LaplaceEstimator:
             v = v_new
 
         return lambda_new.item(), v_new
-
-    def curvature_report(self, top_k: int = 8) -> dict:
-        """
-        Print and return a full curvature diagnostic report:
-        - Smallest and largest eigenvalues
-        - Flatness ratio
-        - Top contributing parameters for each direction
-
-        Returns:
-            dict with keys:
-                'lambda_min', 'lambda_max', 'flatness_ratio',
-                'interpretation', 'top_min', 'top_max'
-        """
-        λmin, vmin = self.extremal_eigenpair("smallest")
-        λmax, vmax = self.extremal_eigenpair("largest")
-        ratio = λmin / λmax if λmax != 0 else float("inf")
-
-        if ratio > 1e-2:
-            note = "Well-conditioned"
-        elif ratio > 1e-6:
-            note = "Mild sloppiness"
-        else:
-            note = "Severe non-identifiability"
-
-        print("\n================ CURVATURE REPORT ================\n")
-        print(f"  Smallest eigenvalue     : {λmin:.3e}")
-        print(f"  Largest  eigenvalue     : {λmax:.3e}")
-        print(f"  Flatness ratio (λ_min/λ_max): {ratio:.3e}")
-        print(f"  Interpretation          : {note}")
-
-        entries = list(self.pt.name_to_index_map.items())   
-        top_k = min(top_k, len(entries))
-
-        def top_components(direction: torch.Tensor, label: str) -> List[Tuple[str, float]]:
-            flat = direction.detach().cpu()         
-            index_to_name = {v: k for k, v in entries}
-            top_entries = torch.topk(flat.abs(), top_k)
-
-            result = []
-            print(f"\n  >>> Top {top_k} parameters in {label} direction:")
-            for idx, val in zip(top_entries.indices.tolist(), top_entries.values.tolist()):
-                name = index_to_name.get(idx, f"<unknown-{idx}>")
-                component = direction[idx].item()
-                print(f"    {name:<30} {component:+8.4e}")
-                result.append((name, component))
-            return result
-
-        top_min = top_components(vmin, "flattest (λ_min)")
-        top_max = top_components(vmax, "steepest (λ_max)")
-
-        print("\n==================================================\n")
-
-        return {
-            "lambda_min": λmin,
-            "lambda_max": λmax,
-            "flatness_ratio": ratio,
-            "interpretation": note,
-            "top_min": top_min,
-            "top_max": top_max
-        }

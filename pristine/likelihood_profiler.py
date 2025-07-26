@@ -48,7 +48,7 @@ import math
 import scipy.stats as stats
 import pandas as pd
 from typing import Tuple, List
-from .laplace_estimator import LaplaceEstimator
+from .hessian_tools import HessianTools
 from .parameter_tools import ParameterTools, TensorAccessor
 from .optimize import Optimizer
 from scipy.optimize import brentq
@@ -65,6 +65,7 @@ class LikelihoodProfiler:
     def __init__(self, model):
         self.model = model
         self.pt = ParameterTools(model)
+        self.lap = HessianTools(model)
         self.range_factor: float = 2
         self.reoptimize: bool = True
         self.max_expand: int = 8
@@ -164,27 +165,29 @@ class LikelihoodProfiler:
             the standard deviation of the target parameter.
         """
         # Step 1: Get MLE point and stddev from Laplace
-        lap = LaplaceEstimator(self.model)
+        lap = HessianTools(self.model)
         # center = self.accessor.get()
         center = self.pt.get_accessor(name).get()
         stddev = lap.estim_variance_by_name(name).sqrt().item()
         span = stddev * self.range_factor
         loss_mle = self.model.loss().item()
 
-        # Define objective: zero when loss crosses the profiling threshold
-        def loss_diff(value: float) -> float:
-            fixed = [(name, value)]
-            modcopy = copy.deepcopy(self.model)
-            loss = LikelihoodProfiler.optimize_with_fixed_parameters(
-                modcopy,
-                fixed_params=fixed,
-                reoptimize=self.reoptimize,
-                optimizer_args={"initial_lr": 0.1, "max_iterations": 500}
-            )
-            return loss - loss_mle - tol
-
         def find_bound(direction: str) -> float:
+            # Define objective: zero when loss crosses the profiling threshold
             sign = -1.0 if direction == "lower" else 1.0
+            # modcopy = copy.deepcopy(self.model)
+            
+            def loss_diff(value: float) -> float:
+                fixed = [(name, value)]
+                modcopy = copy.deepcopy(self.model)          
+                loss = LikelihoodProfiler.optimize_with_fixed_parameters(
+                    modcopy,
+                    fixed_params=fixed,
+                    reoptimize=self.reoptimize,
+                    optimizer_args={"initial_lr": 0.1, "max_iterations": 500}
+                )
+                return loss - loss_mle - tol            
+            
             a = center
             b = center + sign * span
             for i in range(self.max_expand):
@@ -208,51 +211,85 @@ class LikelihoodProfiler:
         delta_logL = 0.5 * chi2_threshold
         return delta_logL
 
-    def estimate_confint(self, name: str, confidence_level=0.95) -> Tuple[float, float]:
+    ############################################################################
+    # SINGLE-PARAMETER CONFIDENCE BOUNDS
+    ############################################################################
+
+    def estimate_confint_scalar_profile(
+        self,
+        name: str,
+        confidence_level: float = 0.95
+    ) -> Tuple[float, float]:
         """
-        Estimate confidence interval using likelihood profiling.
-        Falls back to Laplace approximation if profiling fails.
+        Compute the confidence interval for a single parameter using likelihood profiling.
 
         Parameters:
-        - confidence_level: confidence level for the interval (default 0.95)
+            name: full parameter name (e.g., "clock.log_rate" or "treecal.node_dates[2]")
+            confidence_level: confidence level (e.g., 0.95)
+
+        Returns:
+            (lower, upper) bounds
         """
-        
-        # For profiling: use chi-square threshold for 1 DOF
-        delta_logL = LikelihoodProfiler.get_delta_log_likelihood(
-            confidence_level=confidence_level, dof=1)
+        delta_logL = self.get_delta_log_likelihood(confidence_level=confidence_level)
+        return self.profile_brent(name=name, tol=delta_logL)
 
-        try:
-            lower, upper = self.profile_brent(
-                name=name,
-                tol=delta_logL
-            )
+    def estimate_confint_scalar_laplace(
+        self,
+        name: str,
+        confidence_level: float = 0.95
+    ) -> Tuple[float, float]:
+        """
+        Estimate confidence interval for a parameter using Laplace approximation
+        with conjugate gradient-based inverse Hessian.
 
-            if lower == upper:
-                raise RuntimeError("Profile bounds did not diverge from center.")
+        Parameters:
+            name: full parameter name (e.g., 'clock.log_rate')
+            confidence_level: desired level (default: 0.95)
 
-            return lower, upper
+        Returns:
+            (lower, upper) bounds as floats
+        """
+        self.lap.dense = False  # Enforce CG-based diagonal Hessian inversion
+        center = self.pt.get_accessor(name).get()
+        std = self.lap.estim_variance_by_name(name).sqrt().item()
+        z_score = stats.norm.ppf(0.5 + confidence_level / 2)
+        delta = z_score * std
+        return center - delta, center + delta
 
-        except Exception as e:
-            warnings.warn(f"[Fallback] Likelihood profiling failed: {str(e)}\n"
-                          f"Returning Laplace-based symmetric interval.")
+    def estimate_confint_scalar(
+        self,
+        name: str,
+        confidence_level: float = 0.95,
+        method: str = "profile"
+    ) -> Tuple[float, float]:
+        """
+        Wrapper to choose CI estimation method.
 
-            from .laplace_estimator import LaplaceEstimator
-            lap = LaplaceEstimator(self.model)
-            center = self.pt.get_accessor(name).get()
-            std = lap.estim_variance_by_name(name).sqrt().item()
-            z_score = stats.norm.ppf(0.5 + confidence_level / 2)
-            delta = z_score * std
-            return center - delta, center + delta
+        method: "profile" or "laplace"
+        """
+        if method == "profile":
+            return self.estimate_confint_scalar_profile(name, confidence_level)
+        elif method == "laplace":
+            return self.estimate_confint_scalar_laplace(
+                name, confidence_level)
+        else:
+            raise ValueError(f"Unknown method: {method}")
 
-    def estimate_confint_all(self, names: List[str] = None, confidence_level=0.95) -> pd.DataFrame:
+    ############################################################################
+    # MULTI-PARAMETER CONFIDENCE BOUNDS
+    ############################################################################
+
+    def estimate_confints(self, names: str | List[str] = None, confidence_level=0.95, method: str = "profile") -> pd.DataFrame:
         """
         Estimate confidence intervals via profiling for multiple parameters.
 
         Returns a DataFrame with columns:
-            name | center | lower | upper | width | used_fallback
+            name | lower | center | upper | method
         """
         if names is None:
-            names = self.pt.get_indexed_names()
+            names = self.pt.get_indexed_names()        
+        elif isinstance(names, str):
+            names: List[str] = [names]
 
         records = []
         for name in names:
@@ -260,37 +297,24 @@ class LikelihoodProfiler:
             model_copy = copy.deepcopy(self.model)
             profiler = LikelihoodProfiler(model_copy)
             center = profiler.pt.get_accessor(name).get()
-            try:
-                ci_low, ci_high = profiler.estimate_confint(
-                    name=name,
-                    confidence_level=confidence_level
-                )
-                used_fallback = False
-            except Exception as e:
-                warnings.warn(f"[Fallback] {name}: {e}")
-                from .laplace_estimator import LaplaceEstimator
-                lap = LaplaceEstimator(profiler.model)
-                var = lap.estim_variance_by_name(name)
-                if not torch.is_tensor(var):
-                    var = torch.tensor(var)
-                std = var.sqrt().item()
-                from scipy.stats import norm
-                z = norm.ppf(0.5 + confidence_level / 2)
-                delta = z * std
-                ci_low, ci_high = center - delta, center + delta
-                used_fallback = True
+
+            ci_low, ci_high = profiler.estimate_confint_scalar(
+                name=name,
+                confidence_level=confidence_level,
+                method=method
+            )
 
             records.append({
                 "name": name,
                 "lower": ci_low,
                 "center": center,
                 "upper": ci_high,
-                "used_fallback": used_fallback
+                "method": method
             })
 
         return pd.DataFrame(records)
 
-    def estimate_confint_all_parallel(self, names: List[str] = None, confidence_level=0.95) -> pd.DataFrame:
+    def estimate_confints_parallel(self, names: List[str] = None, confidence_level=0.95, method: str = "profile") -> pd.DataFrame:
         """
         Parallelized version of estimate_confint_all using ThreadPoolExecutor.
 
@@ -301,37 +325,30 @@ class LikelihoodProfiler:
             max_workers (int): Number of threads.
 
         Returns:
-            pd.DataFrame with columns: name | lower | center | upper | laplace
+            pd.DataFrame with columns: name | lower | center | upper | method
         """
         if names is None:
-            names = self.pt.get_indexed_names()
+            names = self.pt.get_indexed_names()        
+        elif isinstance(names, str):
+            names: List[str] = [names]
 
         def profile_one(name: str) -> dict:
             model_copy = self._copy_model()
             profiler = LikelihoodProfiler(model_copy)
             center = profiler.pt.get_accessor(name).get()
-            try:
-                ci_low, ci_high = profiler.estimate_confint(
-                    name=name,
-                    confidence_level=confidence_level
-                )
-                used_fallback = False
-            except Exception as e:
-                from .laplace_estimator import LaplaceEstimator
-                lap = LaplaceEstimator(profiler.model)
-                var = lap.estim_variance_by_name(name)
-                std = torch.tensor(var).sqrt().item()
-                from scipy.stats import norm
-                z = norm.ppf(0.5 + confidence_level / 2)
-                delta = z * std
-                ci_low, ci_high = center - delta, center + delta
-                used_fallback = True
+
+            ci_low, ci_high = profiler.estimate_confint_scalar(
+                name=name,
+                confidence_level=confidence_level,
+                method=method
+            )
+
             return {
                 "name": name,
                 "lower": ci_low,
                 "center": center,
                 "upper": ci_high,
-                "laplace": used_fallback
+                "method": method
             }
 
         records = []
@@ -344,10 +361,11 @@ class LikelihoodProfiler:
         df['order'] = df['name'].map({name: i for i, name in enumerate(names)})
         return df.sort_values("order").drop(columns="order").reset_index(drop=True)
 
-    def estimate_confint_all_laplace(self, confidence_level=0.95, dense: bool = True, num_samples = 20) -> pd.DataFrame:
+    def estimate_all_confints_laplace(self, confidence_level=0.95, dense: bool = True, num_samples = 20) -> pd.DataFrame:
         """
         Compute confidence intervals using the Laplace approximation
-        via the full dense inverse Hessian (high accuracy, complexity O(n^3)).
+        via the full dense inverse Hessian (high accuracy, complexity O(n^3))
+        or (for very large models) Hutchinson method
         
         Parameters:
             confidence_level: confidence level (default 0.95)
@@ -356,17 +374,14 @@ class LikelihoodProfiler:
         Returns:
             pd.DataFrame with columns: name | lower | center | upper | laplace
         """
-
-        lap = LaplaceEstimator(self.model)
-        lap.dense = dense  # Force dense Hessian inversion
-        lap.hutchinson_num_samples = num_samples
-        variances = lap.estim_all_variances_dict()
-        pt = ParameterTools(self.model)
+        self.lap.dense = dense  # Force dense Hessian inversion
+        self.lap.hutchinson_num_samples = num_samples
+        variances = self.lap.estim_all_variances_dict()
 
         z_score = norm.ppf(0.5 + confidence_level / 2)
 
         records = []
-        for name, tensor in pt.named_params:
+        for name, tensor in self.pt.named_params:
             center_vals = tensor.detach().view(-1)
             stddev_vals = variances[name].sqrt().view(-1)
             for i in range(center_vals.numel()):
@@ -379,8 +394,103 @@ class LikelihoodProfiler:
                     "lower": center - delta,
                     "center": center,
                     "upper": center + delta,
-                    "laplace": True  # Always fallback, no profiling
+                    "method": "laplace"
                 })
 
         return pd.DataFrame(records)
     
+    ###############################################################################
+    # CURVATURE ANALYSIS
+    ###############################################################################
+    """
+    In optimization and statistical inference, curvature analysis helps us understand how
+    sensitive the likelihood or loss function is to changes in the model parameters. This
+    sensitivity is captured by the second derivative of the loss, called the Hessian matrix.
+
+    The eigenvalues of the Hessian represent the curvature along specific directions in
+    parameter space. A large eigenvalue means the loss increases rapidly in that direction,
+    indicating a steep, well-constrained surface. A small eigenvalue means the loss changes
+    very little, even when moving far along that direction. This reveals a flat, poorly
+    identified, or redundant parameter combination.
+
+    By computing the smallest and largest eigenvalues of the Hessian, we can assess the
+    overall shape of the loss surface. The ratio of these two values is called the curvature
+    ratio or condition number. If this ratio is close to one, the surface is round and
+    well-behaved. If the ratio is very small—say, one millionth—it means there is a flat
+    valley where many different parameter settings give nearly the same likelihood.
+
+    Flat directions in the Hessian often signal non-identifiability. That is, the data do
+    not contain enough information to estimate some parameter combinations independently.
+    For example, if increasing one parameter has the same effect on the likelihood as
+    decreasing another, they are not separately identifiable.
+
+    To help interpret this, the curvature report prints both the smallest and largest
+    eigenvalues, the flatness ratio, and a classification: well-conditioned, mildly sloppy,
+    or severely non-identifiable. It also lists the most influential parameters in both the
+    flattest and steepest directions. This tells you which parameters are uncertain or
+    possibly redundant, and which ones are tightly constrained by the data.
+
+    Curvature analysis is not just a numerical tool; it gives insight into the structure of
+    your model. It reveals where the likelihood is informative and where it is indifferent.
+    This can guide reparameterization, regularization, or data collection strategies to
+    improve inference and interpretability.
+    """    
+    def curvature_report(self, top_k: int = 8) -> dict:
+        """
+        Print and return a full curvature diagnostic report:
+        - Smallest and largest eigenvalues
+        - Flatness ratio
+        - Top contributing parameters for each direction
+
+        Returns:
+            dict with keys:
+                'lambda_min', 'lambda_max', 'flatness_ratio',
+                'interpretation', 'top_min', 'top_max'
+        """
+        λmin, vmin = self.lap.extremal_eigenpair("smallest")
+        λmax, vmax = self.lap.extremal_eigenpair("largest")
+        ratio = λmin / λmax if λmax != 0 else float("inf")
+
+        if ratio > 1e-2:
+            note = "Well-conditioned"
+        elif ratio > 1e-6:
+            note = "Mild sloppiness"
+        else:
+            note = "Severe non-identifiability"
+
+        print("\n================ CURVATURE REPORT ================\n")
+        print(f"  Smallest eigenvalue     : {λmin:.3e}")
+        print(f"  Largest  eigenvalue     : {λmax:.3e}")
+        print(f"  Flatness ratio (λ_min/λ_max): {ratio:.3e}")
+        print(f"  Interpretation          : {note}")
+
+        entries = list(self.pt.name_to_index_map.items())   
+        top_k = min(top_k, len(entries))
+
+        def top_components(direction: torch.Tensor, label: str) -> List[Tuple[str, float]]:
+            flat = direction.detach().cpu()         
+            index_to_name = {v: k for k, v in entries}
+            top_entries = torch.topk(flat.abs(), top_k)
+
+            result = []
+            print(f"\n  >>> Top {top_k} parameters in {label} direction:")
+            for idx, val in zip(top_entries.indices.tolist(), top_entries.values.tolist()):
+                name = index_to_name.get(idx, f"<unknown-{idx}>")
+                component = direction[idx].item()
+                print(f"    {name:<30} {component:+8.4e}")
+                result.append((name, component))
+            return result
+
+        top_min = top_components(vmin, "flattest (λ_min)")
+        top_max = top_components(vmax, "steepest (λ_max)")
+
+        print("\n==================================================\n")
+
+        return {
+            "lambda_min": λmin,
+            "lambda_max": λmax,
+            "flatness_ratio": ratio,
+            "interpretation": note,
+            "top_min": top_min,
+            "top_max": top_max
+        }
