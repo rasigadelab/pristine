@@ -149,11 +149,3 @@ print(f"Estimated sampling rate: {bds.sampling().item(): .3f}")
 print(f"Estimated birth intercept: {bds.intercept.item(): .3f}")
 print(f"Estimated beta_0: {bds.coeffs[0].item(): .3f}, beta_1: {bds.coeffs[1].item(): .3f}")
 
-#%%
-# Curvature report
-from pristine.hessian_tools import HessianTools
-
-laplace = HessianTools(model)
-laplace.curvature_report()
-
-# %%
