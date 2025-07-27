@@ -20,8 +20,9 @@
 # Commercial licensing is available upon request. Please contact the author.
 # -----------------------------------------------------------------------------
 import torch
-import torch.optim as optim
+import torch.optim
 from typing import List, Any
+import matplotlib.pyplot as plt
 from .parameter_tools import ParameterTools
 
 class Optimizer:
@@ -95,7 +96,9 @@ class Optimizer:
         convergence_threshold: float = 0.001
     ):
         self.model = model
-        self.parameters = ParameterTools(model).params
+        self.pt = ParameterTools(model)
+
+        # Parameters
         self.initial_lr = initial_lr
         self.backtrack_enable = backtrack_enable
         self.backtrack_factor = backtrack_factor
@@ -104,7 +107,41 @@ class Optimizer:
         self.max_iterations = max_iterations
         self.print_interval = print_interval
         self.convergence_threshold = convergence_threshold
+
+        # Optimizer reset/restart control
+        self.reset_interval = 500
+        self.patience = 50
+        self.patience_ratio = 10
+        self.patience_loglik_threshold = convergence_threshold * self.patience_ratio
+        self.num_post_convergence_restarts = 5
+        self.max_lr_restarts = 1  # configurable
+        self.lr_restart_count = 0
+
+        # Run diagnostics
         self.num_iter = 0 # Iteration counter
+        self.backtrack_counter = 0
+        self.loss_history = []       # Store loss
+        self.lr_history = []         # Store learning rate per iteration
+        self.restart_count = -1
+        self.restart_iters = []      # Iterations at which restarts occurred
+        self.backtrack_iters = []    # Iterations where any backtracking was triggered
+        self.convergence_restart_count = 0
+
+        self.optimizer = torch.optim.Adam(self.pt.params, lr=self.initial_lr)
+        # self.reset_optimizer()
+
+    def reset_optimizer(self) -> None:
+        """
+        Reset the internal Adam optimizer state and learning rate.
+
+        This clears all moment estimates (m, v) and resets the learning rate
+        to `self.initial_lr`. Use during learning rate scheduling restarts.
+        """
+        self.optimizer = torch.optim.Adam(self.pt.params, lr=self.initial_lr)
+        self.backtrack_counter = 0
+        self.restart_count += 1
+        self.restart_iters.append(self.num_iter)
+        print("_", end="", flush=True)
 
     def optimize(self) -> List[torch.Tensor]:
         """
@@ -126,12 +163,9 @@ class Optimizer:
                 If parameter values or gradients become non-finite, and
                 backtracking is disabled.
         """
-        # Define optimizer
-        optimizer = optim.Adam(self.parameters, lr=self.initial_lr)
-
         for self.num_iter in range(self.max_iterations):
             # Zero-out existing gradients
-            optimizer.zero_grad()
+            self.optimizer.zero_grad()
 
             # Compute loss
             loss = self.model.loss()
@@ -140,7 +174,7 @@ class Optimizer:
             loss.backward(retain_graph=True) 
 
             # Check variable and grad finiteness
-            for param in self.parameters:
+            for param in self.pt.params:
                 if not torch.isfinite(param).all():
                     raise RuntimeError("Non-finite free parameter, exiting. Consider investigating \
                         using torch.autograd.set_detect_anomaly(True)")   
@@ -153,49 +187,150 @@ class Optimizer:
                 print(".", end="", flush=True)
 
             # Store old values of parameters
-            old_parameters = [param.clone().detach() for param in self.parameters]
+            old_parameters = [param.clone().detach() for param in self.pt.params]
 
             # Optimizer step (initial attempt)
-            optimizer.step()
+            self.optimizer.step()
 
             # Compute new loss after the step
             new_loss = self.model.loss()
+
+            #############################################################################
+            # BACKTRACKING LOGIC
+            #############################################################################
 
             # Backtracking if new loss is NaN/inf or worse than old loss
             while (not torch.isfinite(new_loss)) or (new_loss > loss + self.convergence_threshold):
                 if self.backtrack_enable is not True:
                     raise RuntimeError("Non-finite objective or bad search direction. Consoder enabling backtracking.")
 
+                self.backtrack_counter += 1
+
                 # Reduce the learning rate
-                for param_group in optimizer.param_groups:
+                for param_group in self.optimizer.param_groups:
                     param_group['lr'] *= self.backtrack_factor
 
-                    # If learning rate is below minimum, stop
+                    # If learning rate is below minimum, restart
                     if param_group['lr'] < self.min_lr:
-                        # print(f"\nStopping early at iteration {self.num_iter}: learning rate ({param_group['lr']:.2e}) too small.")
-                        print("!", end="", flush=True)
-                        return self.parameters
+                        if self.lr_restart_count < self.max_lr_restarts:
+                            self.lr_restart_count += 1
+                            print("!", end="", flush=True)
+                            # print(f"\n[Restart] LR fell below min_lr at iter {self.num_iter}, restarting...")
+                            self.reset_optimizer()
+                            continue  # restart optimization from scratch
+                        else:
+                            # We're really stuck...
+                            print("/!\\", end="", flush=True)
+                            return self.pt.params
 
                 # Revert parameters to old values
                 with torch.no_grad():
-                    for old_param, param in zip(old_parameters, self.parameters):
+                    for old_param, param in zip(old_parameters, self.pt.params):
                         param.copy_(old_param)
 
                 # Retry the step with reduced learning rate
-                optimizer.zero_grad()
+                self.optimizer.zero_grad()
                 loss.backward(retain_graph=True)
-                optimizer.step()
+                self.optimizer.step()
                 new_loss = self.model.loss()
 
+            #############################################################################
+            # LOG DIAGNOSTICS
+            #############################################################################
+
+            # Log that this iteration backtracked at least once
+            if self.backtrack_counter > 0:
+                self.backtrack_iters.append(self.num_iter)
+                self.backtrack_counter = 0
+
+            # Track loss
+            self.loss_history.append(new_loss.item())
+
+            # Store base learning rate (same for all params in this setup)
+            self.lr_history.append(self.optimizer.param_groups[0]['lr'])
+
+            #############################################################################
+            # OPTIMIZER RESET LOGIC
+            #############################################################################
+
+            # 1. Stagnation-based restart
+            if len(self.loss_history) > self.patience:
+                window = self.loss_history[-self.patience:]
+                if max(window) - min(window) < self.patience_loglik_threshold:
+                    self.reset_optimizer()
+                    continue
+
+            # 2. Fixed interval restart            
+            if self.num_iter > 0 and self.num_iter % self.reset_interval == 0:
+                self.reset_optimizer()
+                continue
+
+            #############################################################################
+            # CONVERGENCE CHECK AND REACCELERATION
+            #############################################################################
             # Check for convergence
             if self.num_iter > 10 and abs(new_loss - loss) < self.convergence_threshold:
-                # print(f"\nConverged at iteration {self.num_iter}, Loss: {loss.item():.3e}")
-                break
+                if self.convergence_restart_count < self.num_post_convergence_restarts:
+                    self.convergence_restart_count += 1
+                    self.reset_optimizer()
+                    # print(">", end="", flush=True)
+                    continue  # Resume optimization from restart
+                else:
+                    print(">", end="", flush=True)
+                    # print(f"\n[Info] Converged after {self.num_iter + 1} iterations "
+                        # f"with {self.convergence_restart_count} convergence restarts.")
+                    break
+
 
             # Restore the learning rate partially (per original code: dividing by backtrack_factor**0.5)
-            for param_group in optimizer.param_groups:
-                if param_group['lr'] < self.initial_lr:
-                    param_group['lr'] /= (self.backtrack_factor ** self.lr_accel_decel_factor)
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] /= (self.backtrack_factor ** self.lr_accel_decel_factor)
 
-        return self.parameters
+                # if param_group['lr'] < self.initial_lr:
+                #     param_group['lr'] /= (self.backtrack_factor ** self.lr_accel_decel_factor)
 
+        return self.pt.params
+
+    def plot_diagnostics(self):
+        """
+        Plot loss and learning rate trajectories over iterations,
+        marking restarts (dashed lines) and backtracks (triangles).
+        """
+        if not self.loss_history or not self.lr_history:
+            print("No optimization history available to plot.")
+            return
+
+        iterations = list(range(len(self.loss_history)))
+
+        fig, ax1 = plt.subplots(figsize=(8, 4))
+
+        # --- Loss curve (left y-axis)
+        ax1.set_xlabel("Iteration")
+        ax1.set_ylabel("Loss", color="tab:blue")
+        ax1.plot(iterations, self.loss_history, color="tab:blue", label="Loss")
+        ax1.tick_params(axis="y", labelcolor="tab:blue")
+
+        # Mark backtracking steps
+        if hasattr(self, "backtrack_iters"):
+            bt_valid = [(i, self.loss_history[i]) for i in self.backtrack_iters if i < len(self.loss_history)]
+            if bt_valid:
+                x_bt, y_bt = zip(*bt_valid)
+                ax1.plot(x_bt, y_bt, "v", color="red", label="Backtrack", markersize=5)
+
+        # Mark restarts
+        if hasattr(self, "restart_iters"):
+            for i in self.restart_iters:
+                ax1.axvline(x=i, color="gray", linestyle="--", alpha=0.5)
+            if self.restart_iters:
+                ax1.text(self.restart_iters[-1], max(self.loss_history), "Restarts", color="gray", ha="left", fontsize=8)
+
+        # --- Learning rate curve (right y-axis)
+        ax2 = ax1.twinx()
+        ax2.set_ylabel("Learning Rate", color="tab:red")
+        ax2.plot(iterations, self.lr_history, color="tab:red", linestyle="--", label="Learning Rate")
+        ax2.tick_params(axis="y", labelcolor="tab:red")
+
+        # --- Final layout
+        fig.tight_layout()
+        plt.title("Loss, Learning Rate, and Restart/Backtrack Diagnostics")
+        plt.show()

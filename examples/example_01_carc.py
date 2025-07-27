@@ -64,6 +64,7 @@ clock = ContinuousAdditiveRelaxedClock(
 # model = Model(clock=clock, treecal=treecal)
 loss_init = clock.loss().item()
 optim = pristine.optimize.Optimizer(clock)
+optim.reset_interval = 200
 
 start = time.perf_counter()
 optim.optimize()

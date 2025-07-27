@@ -263,7 +263,7 @@ class LikelihoodProfiler:
             (lower, upper) bounds
         """
         delta_logL = self.get_delta_log_likelihood(confidence_level=confidence_level)
-        return self.profile_brent(name=name, tol=delta_logL)
+        return self.profile_brent(name=name, loglik_drop=delta_logL)
 
     def estimate_confint_scalar_laplace(
         self,
