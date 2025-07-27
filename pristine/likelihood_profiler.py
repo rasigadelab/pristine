@@ -286,7 +286,7 @@ class LikelihoodProfiler:
         std = self.lap.estim_variance_by_name(name).sqrt().item()
         z_score = stats.norm.ppf(0.5 + confidence_level / 2)
         delta = z_score * std
-        return center - delta, center + delta
+        return float(center - delta), float(center + delta)
 
     def estimate_confint_scalar(
         self,

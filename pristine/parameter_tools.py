@@ -89,10 +89,39 @@ class ParameterTools:
         Automatically collects all trainable leaf parameters and their names.
         """
         self.model = model
-        self.named_params: List[Tuple[str, torch.Tensor]] = self._collect_named_leaf_parameters(model)
-        self.params: List[torch.Tensor] = [p for _, p in self.named_params]
+
+        # Step 1: Raw (possibly duplicate) collection
+        all_named_tensors = self._collect_all_named_tensors(model)
+
+        # Step 2: Deduplicate by tensor identity and alias tracking
+        id_to_names: Dict[int, List[str]] = {}
+        id_to_tensor: Dict[int, torch.Tensor] = {}
+
+        for name, tensor in all_named_tensors:
+            tid = id(tensor)
+            if tid not in id_to_names:
+                id_to_names[tid] = [name]
+                id_to_tensor[tid] = tensor
+            else:
+                id_to_names[tid].append(name)
+
+        # Unique (canonical) parameter list
+        self.named_params: List[Tuple[str, torch.Tensor]] = [
+            (id_to_names[tid][0], tensor) for tid, tensor in id_to_tensor.items()
+        ]
+        self.params: List[torch.Tensor] = [tensor for _, tensor in self.named_params]
         self.shapes: List[torch.Size] = [p.shape for p in self.params]
+
+        # Alias resolution map (alias name → canonical name)
+        self.alias_map: Dict[str, str] = {
+            alias: names[0]
+            for names in id_to_names.values()
+            for alias in names
+        }
+
+        # Index map for flattened view
         self.name_to_index_map: Dict[str, int] = self._build_flat_index_map()
+
 
     @staticmethod
     def flatten_tensor_list(tensors: Tuple[torch.Tensor]) -> torch.Tensor:
@@ -102,7 +131,7 @@ class ParameterTools:
         """
         return torch.cat([t.view(-1) for t in tensors])
 
-    def _collect_named_leaf_parameters(self, obj: Any, prefix="") -> List[Tuple[str, torch.Tensor]]:
+    def _collect_all_named_tensors(self, obj: Any, prefix="") -> List[Tuple[str, torch.Tensor]]:
         named_params = []
 
         if isinstance(obj, torch.Tensor):
@@ -111,15 +140,15 @@ class ParameterTools:
 
         elif isinstance(obj, dict):
             for k, v in obj.items():
-                named_params.extend(self._collect_named_leaf_parameters(v, prefix + f"{k}."))
+                named_params.extend(self._collect_all_named_tensors(v, prefix + f"{k}."))
 
         elif isinstance(obj, (list, tuple)):
             for i, item in enumerate(obj):
-                named_params.extend(self._collect_named_leaf_parameters(item, prefix + f"{i}."))
+                named_params.extend(self._collect_all_named_tensors(item, prefix + f"{i}."))
 
         elif hasattr(obj, '__dict__'):
             for k, v in vars(obj).items():
-                named_params.extend(self._collect_named_leaf_parameters(v, prefix + f"{k}."))
+                named_params.extend(self._collect_all_named_tensors(v, prefix + f"{k}."))
 
         return named_params
 
@@ -164,7 +193,14 @@ class ParameterTools:
         """
         Returns the global flat index corresponding to a named parameter element (e.g., "clock.weight[2]").
         """
-        return self.name_to_index_map[name_with_index]
+        base, idx = self.parse_name(name_with_index)
+        canonical_base = self.resolve_alias(base)
+        if idx is None:
+            # scalar
+            return self.name_to_index_map[canonical_base]
+        else:
+            indexed_name = f"{canonical_base}[{idx}]"
+            return self.name_to_index_map[indexed_name]
 
     def get_named_parameters(self) -> List[Tuple[str, torch.Tensor]]:
         """
@@ -186,12 +222,13 @@ class ParameterTools:
         """
         Ensures scalar names like 'clock.log_rate' are mapped to 'clock.log_rate[0]' if needed.
         """
-        if name in self.name_to_index_map:
-            return name
-        base = name.split("[")[0]
-        candidate = f"{base}[0]"
-        if candidate in self.name_to_index_map:
-            return candidate
+        base, idx = self.parse_name(name)
+        canonical_base = self.resolve_alias(base)
+        if idx is None:
+            return canonical_base
+        indexed_name = f"{canonical_base}[{idx}]"
+        if indexed_name in self.name_to_index_map:
+            return indexed_name
         raise KeyError(f"Name '{name}' could not be resolved to a parameter index.")
 
     def parse_name(self, name: str) -> Tuple[str, int | None]:
@@ -208,5 +245,20 @@ class ParameterTools:
     
     def get_accessor(self, name: str)->TensorAccessor:
         base, idx = self.parse_name(name)
+        base = self.resolve_alias(base)
         param = dict(self.named_params)[base]
         return TensorAccessor(param, idx)
+    
+    def resolve_alias(self, name: str) -> str:
+        if name in self.alias_map:
+            return self.alias_map[name]
+
+        # If name includes an index, resolve alias on the base only
+        match = re.match(r"^(.*)\[(\d+)\]$", name)
+        if match:
+            base, idx = match.groups()
+            canonical_base = self.alias_map.get(base, base)
+            return f"{canonical_base}[{idx}]"
+
+        # Otherwise, return unchanged
+        return name
