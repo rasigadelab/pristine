@@ -20,27 +20,6 @@
 # Commercial licensing is available upon request. Please contact the author.
 # -----------------------------------------------------------------------------
 
-"""
-The LikelihoodProfiler class estimates confidence intervals for model
-parameters using a technique called likelihood profiling. Rather than
-relying solely on local curvature (as in the Laplace approximation), it
-perturbs a selected parameter, re-optimizes the model for each value, and
-tracks how the likelihood changes. The confidence bounds are identified as
-the parameter values where the log-likelihood falls below a predefined
-threshold from its maximum.
-
-This method provides a more reliable estimate of uncertainty than
-second-order approximations, particularly when the likelihood surface is
-non-quadratic or asymmetric. It is especially useful in maximum-likelihood
-settings where parameters may be poorly constrained or interdependent.
-
-The class includes robust fallbacks: if profiling fails (e.g., due to
-optimization instability or bracketing issues), it returns an interval based
-on the Laplace approximation. It also supports profiling multiple parameters
-in sequence or in parallel, returning confidence intervals in a structured
-format suitable for downstream use.
-"""
-
 import torch
 import copy
 import warnings
@@ -53,14 +32,63 @@ from .parameter_tools import ParameterTools, TensorAccessor
 from .optimize import Optimizer
 from scipy.optimize import brentq
 from concurrent.futures import ThreadPoolExecutor, as_completed
-# import multiprocessing as mp
 import os
 from tqdm import tqdm
 from scipy.stats import norm
 
 class LikelihoodProfiler:
     """
-    Refines confidence intervals using likelihood profiling.
+    Estimate parameter confidence intervals via likelihood profiling and Laplace approximation.
+
+    This class supports two complementary strategies for quantifying parameter uncertainty
+    in differentiable models:
+
+    1. Likelihood profiling:
+        Re-optimizes all parameters while perturbing one target parameter at a time.
+        Confidence intervals are derived by identifying where the log-likelihood drops
+        by a fixed threshold from its maximum. Profiling handles non-quadratic or
+        asymmetric likelihood surfaces and provides robust intervals in poorly-identified
+        models.
+
+    2. Laplace approximation:
+        Estimates confidence intervals using a local quadratic approximation to the
+        log-likelihood. Inverts the (dense or implicit) Hessian to recover marginal
+        variances. Faster but less accurate when the likelihood is not approximately Gaussian.
+
+    The profiler also supports:
+        - Parallelized interval estimation for large models
+        - Fallback from profiling to Laplace when optimization fails
+        - Eigenvalue-based curvature diagnostics to assess identifiability and sloppiness
+
+    Parameters:
+        model: A differentiable model instance with a `.loss()` method and parameter tensors.
+
+    Attributes:
+        pt: ParameterTools instance for the model
+        lap: HessianTools instance for Laplace variance estimation
+        range_factor: Span (in stddevs) used to initialize profiling brackets
+        reoptimize: Whether to re-fit model when profiling each fixed parameter value
+        max_expand: Max number of bracketing attempts for root-finding in profiling
+        max_workers: Maximum number of threads for parallel profiling
+
+    Methods:
+        estimate_confint_scalar(name, confidence_level, method):
+            Compute 1D confidence interval for a named parameter using either
+            'profile' or 'laplace' method.
+
+        estimate_confints(names, confidence_level, method):
+            Compute intervals for a list of parameters (sequential version).
+
+        estimate_confints_parallel(names, confidence_level, method):
+            Same as above, but using parallel execution with threads.
+
+        estimate_all_confints_laplace(confidence_level, dense, num_samples):
+            Estimate Laplace-based intervals for all parameters.
+
+        curvature_report(top_k):
+            Print and return curvature diagnostics using Hessian eigenanalysis,
+            including smallest/largest eigenvalue, flatness ratio, and
+            most influential parameters.
     """
     def __init__(self, model):
         self.model = model
@@ -130,39 +158,43 @@ class LikelihoodProfiler:
         return model.loss().item()
     
 
-    def profile_brent(self, name: str, tol: float = 1.92) -> Tuple[float, float]:
+    def profile_brent(self, name: str, loglik_drop: float = 1.92) -> Tuple[float, float]:
         """
         Estimate a confidence interval for a scalar parameter using likelihood profiling
-        and Brent's root-finding method.
+        with Brent’s root-finding method.
 
-        This method identifies the values of a target parameter at which the negative
-        log-likelihood increases by a specified threshold (`tol`) from its minimum.
-        It reoptimizes all other model parameters while keeping the target parameter fixed,
-        using Brent's algorithm to solve for the interval endpoints.
+        This method fixes the parameter identified by `name` at different values and reoptimizes
+        all other free parameters. It identifies the points at which the negative log-likelihood
+        increases by a threshold `loglik_drop` from its minimum. These threshold-crossing points define the
+        lower and upper bounds of the confidence interval.
 
-        If the initial search bracket does not contain a root (i.e., the profile likelihood
-        does not cross the threshold), the bracket is expanded geometrically up to 
-        `max_expand` times. If no root is found, the corresponding bound is set to infinity.
+        Brent's algorithm is used to solve for the roots of the log-likelihood difference function
+        on each side of the maximum-likelihood estimate. If no bracketing root is found initially,
+        the method expands the search interval geometrically up to `max_expand` times.
 
-        Parameters:
-            reoptimize (bool): Whether to reoptimize other parameters at each fixed value
-                            of the profiled parameter. Should be True for valid profiling.
-            range_factor (float): Number of Laplace-based standard deviations to use for
-                                the initial search bracket around the MLE.
-            tol (float): The log-likelihood drop (Δℓ) defining the confidence bound.
-                        For a 95% CI, use 1.92 (≈0.5·χ²₀.₉₅,₁).
-            max_expand (int): Maximum number of bracket-doubling steps if the root is not
-                            bracketed initially.
+        Args:
+            name (str):
+                The fully qualified parameter name, possibly with index (e.g., "clock.log_rate[0]").
+            
+            loglik_drop (float, default=1.92):
+                The log-likelihood drop defining the confidence bound. Use
+                $loglik_drop = 0.5 \cdot \chi^2_{1, 1 - \alpha}$ for a $(1-\alpha) \cdot 100\%$ confidence level.
+                For example, 1.92 corresponds to a 95% interval when degrees of freedom = 1.
 
         Returns:
-            Tuple[float, float]: The lower and upper bounds of the confidence interval
-                                for the profiled parameter. If a bound could not be
-                                determined, it will be set to ±∞.
+            Tuple[float, float]:
+                The (lower_bound, upper_bound) of the profiled confidence interval.
+                If a bound cannot be determined due to failed bracketing, ±∞ is returned.
+
+        Raises:
+            RuntimeError:
+                If Brent’s method fails to converge within the expanded bracket range.
 
         Notes:
-            - This method assumes the model defines a `.loss()` method returning
-            the negative log-likelihood, and uses a Laplace approximation to estimate
-            the standard deviation of the target parameter.
+            - The method uses a Laplace approximation to initialize the search interval, based on
+            the estimated standard deviation of the parameter.
+            - The model must define `.loss()` and be differentiable with respect to its parameters.
+            - Profiling is most reliable when `reoptimize = True` (default).
         """
         # Step 1: Get MLE point and stddev from Laplace
         lap = HessianTools(self.model)
@@ -186,7 +218,7 @@ class LikelihoodProfiler:
                     reoptimize=self.reoptimize,
                     optimizer_args={"initial_lr": 0.1, "max_iterations": 500}
                 )
-                return loss - loss_mle - tol            
+                return loss - loss_mle - loglik_drop            
             
             a = center
             b = center + sign * span
@@ -294,7 +326,7 @@ class LikelihoodProfiler:
         records = []
         for name in names:
             print(f"\nProfiling: {name}")
-            model_copy = copy.deepcopy(self.model)
+            model_copy = self._copy_model()
             profiler = LikelihoodProfiler(model_copy)
             center = profiler.pt.get_accessor(name).get()
 

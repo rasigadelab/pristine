@@ -20,37 +20,6 @@
 # Commercial licensing is available upon request. Please contact the author.
 # -----------------------------------------------------------------------------
 
-"""
-The `LaplaceEstimator` approximates parameter uncertainty in a differentiable 
-model using the Laplace approximation. Mathematically, the idea is that near 
-the optimum of a well-behaved loss function (typically a negative log-likelihood), 
-the function can be locally approximated by a quadratic. In this regime, the 
-posterior distribution over parameters is approximately Gaussian, centered at 
-the optimum, with a covariance matrix given by the inverse of the Hessian of 
-the loss function.
-
-The main goal of this class is to compute approximate confidence intervals for 
-model parameters using this Gaussian approximation. Specifically, it estimates 
-the diagonal of the inverse Hessian matrix, which corresponds to the marginal 
-variances of individual parameters.
-
-For small models, the class can compute the full Hessian and invert it directly. 
-For larger models, this is infeasible due to memory constraints, so the estimator 
-falls back to a stochastic method known as Hutchinson’s estimator. In this method, 
-the diagonal of the inverse Hessian is approximated using randomized projections 
-combined with iterative linear solvers (specifically, conjugate gradient). This 
-approach avoids forming the full Hessian but still gives a meaningful estimate 
-of uncertainty.
-
-Regularization is included in the dense case to ensure the Hessian is positive 
-definite and invertible. In the Hutchinson case, numerical stability and 
-convergence are handled through careful control of the conjugate gradient solver.
-
-In summary, this class provides a practical way to compute local uncertainty 
-estimates around a model's optimum, supporting both exact and approximate 
-second-order methods depending on the size and structure of the model.
-"""
-
 import torch
 from torch.autograd import grad
 from typing import List, Dict, Any, Tuple
@@ -58,8 +27,33 @@ from .parameter_tools import ParameterTools
 
 class HessianTools:
     """
-    Estimates parameter variance using the Laplace approximation and the diagonal of the inverse Hessian.
-    Uses Hutchinson's method combined with conjugate gradient inversion of Hessian-vector products.
+    Estimate parameter variances and curvature diagnostics using the Laplace approximation
+    in differentiable statistical models.
+
+    This class supports both exact (dense) and approximate (Hutchinson + conjugate gradient)
+    computation of the diagonal of the inverse Hessian of the loss function, which corresponds
+    to marginal posterior variances under a Gaussian approximation near the optimum.
+
+    Main use cases include:
+        - Estimating Laplace variances for confidence interval construction
+        - Eigenvalue analysis of the loss curvature (non-identifiability diagnostics)
+        - Efficient Hessian-vector products for optimization or second-order inference
+
+    Attributes:
+        model: The statistical model with a `.loss()` method and differentiable parameters
+        pt: A ParameterTools instance for flattening/unflattening model parameters
+        params: The list of differentiable leaf tensors
+        dense: If True, use dense Hessian inversion; otherwise use Hutchinson estimation
+        hutchinson_num_samples: Number of samples for Hutchinson estimation
+        cg_residual_tol: Residual tolerance for CG solver
+        verbose: If True, print diagnostics during inversion or CG iterations
+
+    Methods:
+        estimate_inv_hessian_diag(): Compute full diagonal of inverse Hessian
+        estim_variance_by_name(name): Get Laplace variance of a parameter or element
+        estim_all_variances_list(): Return unflattened list of variance tensors
+        estim_all_variances_dict(): Return dict of parameter names to variance tensors
+        extremal_eigenpair(which): Compute smallest or largest eigenvalue/vector of the Hessian
     """
 
     def __init__(self, model: Any):

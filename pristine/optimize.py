@@ -19,29 +19,6 @@
 #
 # Commercial licensing is available upon request. Please contact the author.
 # -----------------------------------------------------------------------------
-
-"""
-The Optimizer class performs numerical optimization of a model's parameters  
-by minimizing its loss function using the Adam algorithm. Conceptually, it  
-automates gradient-based fitting of statistical models or probabilistic  
-phylogenetic models, where each parameter has a well-defined influence on a  
-likelihood or objective function.
-
-This optimizer is designed with robustness in mind: if a step leads to a  
-non-finite (NaN or inf) or worse loss, it backtracks by reducing the learning  
-rate until the update becomes acceptable. This safeguards the fitting  
-procedure from diverging due to unstable gradients, which are common in  
-complex likelihood surfaces. Once stability is restored, the optimizer can  
-slowly increase the learning rate again.
-
-The optimization stops when either the loss stabilizes (i.e., changes less  
-than a small threshold), the learning rate becomes too small, or a maximum  
-number of iterations is reached. This makes it well-suited for models with  
-sharp or noisy likelihood landscapes, like those encountered in phylogenetic  
-inference.
-"""
-
-import sys;import os;sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 import torch
 import torch.optim as optim
 from typing import List, Any
@@ -49,17 +26,61 @@ from .parameter_tools import ParameterTools
 
 class Optimizer:
     """
-    Configuration parameters for Adam optimization with backtracking.
+    Adaptive gradient-based optimizer using Adam with loss-aware backtracking.
+
+    This class performs robust optimization of a differentiable model's parameters by
+    minimizing its `.loss()` method using the Adam algorithm. It is specifically designed
+    for statistical models with sharp or non-convex likelihood surfaces, such as those
+    encountered in phylogenetics or probabilistic inference.
+
+    The optimizer incorporates backtracking logic: if a step leads to a non-finite or
+    worse loss, it reverts the update and reduces the learning rate until the step becomes
+    acceptable. This prevents divergence due to unstable gradients and improves convergence
+    in irregular objective landscapes.
+
+    Optimization stops when:
+        - The loss stabilizes (i.e., the change is below `convergence_threshold`),
+        - The learning rate falls below `min_lr`,
+        - Or the maximum number of iterations (`max_iterations`) is reached.
+
+    Parameters:
+        model (Any):
+            The model instance to optimize. Must define a `.loss()` method and contain
+            differentiable leaf parameters (typically via `requires_grad=True`).
+
+        initial_lr (float, default=0.1):
+            Initial learning rate for the Adam optimizer.
+
+        backtrack_enable (bool, default=True):
+            Whether to enable backtracking if the loss increases or becomes non-finite.
+
+        backtrack_factor (float, default=0.9):
+            Multiplicative factor by which to reduce learning rate during backtracking.
+
+        lr_accel_decel_factor (float, default=0.5):
+            Factor governing how quickly the learning rate recovers after backtracking.
+
+        min_lr (float, default=1e-6):
+            Minimum learning rate. Optimization halts if learning rate drops below this.
+
+        max_iterations (int, default=1000):
+            Maximum number of optimization iterations.
+
+        print_interval (int, default=100):
+            Interval at which to print progress (prints a dot).
+
+        convergence_threshold (float, default=0.001):
+            Threshold for loss change to consider convergence.
 
     Attributes:
-        initial_lr (float): The initial learning rate for Adam.
-        backtrack_factor (float): The factor by which to reduce the learning rate when backtracking.
-        lr_accel_decel_factor (float): The factor by which the learning rate re-accelerates after backtracking
-        min_lr (float): The minimum allowable learning rate; if reached, optimization stops.
-        max_iterations (int): The maximum number of iterations to perform.
-        print_interval (int): Print progress every `print_interval` iterations.
-        convergence_threshold (float): If the absolute difference between new loss and old loss
-        is below this threshold, the optimization is considered converged.
+        parameters (List[torch.Tensor]):
+            List of model parameters to optimize (discovered via `ParameterTools`).
+        num_iter (int):
+            Counter tracking the number of completed iterations.
+
+    Returns:
+        optimize() -> List[torch.Tensor]:
+            The list of optimized parameters (in-place modification of the model).
     """
     def __init__(
         self,
@@ -87,13 +108,25 @@ class Optimizer:
 
     def optimize(self) -> List[torch.Tensor]:
         """
-        Robust adaptive moment (ADAM) optimization with backtracking to handle NaN or infinite losses.
-        If a problematic update is encountered, the learning rate is reduced by a specified
-        factor (`backtrack_factor`) until the new loss is finite and not worse than the old loss.
-        If the learning rate falls below `min_lr`, the optimization is stopped.
+        Perform gradient-based optimization of the model's loss using Adam,
+        with optional backtracking for robustness.
+
+        This method iteratively updates model parameters by minimizing the
+        `.loss()` function, applying adaptive learning rate reduction if
+        the loss increases or becomes non-finite. It automatically reverts
+        failed steps and retries with smaller learning rates until stability
+        is restored or the minimum threshold is reached.
+
+        Returns:
+            List[torch.Tensor]:
+                A list of optimized parameter tensors (in-place in the model).
+
+        Raises:
+            RuntimeError:
+                If parameter values or gradients become non-finite, and
+                backtracking is disabled.
         """
         # Define optimizer
-        # self.parameters = self.parameters()        
         optimizer = optim.Adam(self.parameters, lr=self.initial_lr)
 
         for self.num_iter in range(self.max_iterations):
