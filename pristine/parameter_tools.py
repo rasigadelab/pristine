@@ -20,26 +20,6 @@
 # Commercial licensing is available upon request. Please contact the author.
 # -----------------------------------------------------------------------------
 
-"""
-TensorAccessor is a lightweight utility for safely accessing and modifying
-individual values inside PyTorch tensors, including scalar and indexed entries.
-It ensures gradient integrity by modifying values in-place without interfering
-with autograd. It can also selectively zero out gradients at specific positions,
-which is useful during likelihood profiling or parameter updates in manual
-optimization workflows.
-
-ParameterTools is a model introspection and manipulation utility designed to
-manage structured parameters in custom PyTorch models. It recursively traverses
-the model's attributes and substructures to identify all trainable leaf tensors,
-records their names and shapes, and builds a flat index map for efficient access.
-It enables easy flattening and unflattening of parameters, translating between
-flat vectors (useful for optimizers, profilers, and Laplace estimators) and the
-original model structure. Additionally, it supports name normalization,
-name-to-index mapping, and parsing of parameter element references like
-"clock.log_rate[2]", making it ideal for diagnostic and statistical tasks such
-as confidence interval estimation and profiling.
-"""
-
 from typing import List, Tuple, Any, Dict
 import torch
 import re
@@ -47,7 +27,8 @@ import re
 class TensorAccessor:
     """
     Utility to safely access and modify scalar or indexed tensor values,
-    including handling gradients.
+    including handling gradients. Supports in-place modification and gradient
+    zeroing without breaking autograd.
     """
     def __init__(self, tensor: torch.Tensor, index: int | tuple | None = None):
         self.tensor = tensor
@@ -79,21 +60,22 @@ class TensorAccessor:
 
 class ParameterTools:
     """
-    A utility class for managing and manipulating learnable leaf parameters in a structured model.
-    This instance-based version holds model state, flat parameter index maps, shapes, and names.
+    Introspects a model to extract, flatten, and manipulate its differentiable parameters.
+
+    - Deduplicates parameters based on tensor identity (avoids optimizer duplication).
+    - Maintains canonical and alias names for referencing parameters.
+    - Provides flat indexing, name normalization, and alias-aware lookups.
     """
 
     def __init__(self, model: Any):
         """
-        Initializes the parameter tools for a given model.
-        Automatically collects all trainable leaf parameters and their names.
+        Recursively collects all differentiable leaf tensors in the model.
+        Deduplicates based on identity and builds alias-to-canonical maps.
         """
         self.model = model
 
-        # Step 1: Raw (possibly duplicate) collection
         all_named_tensors = self._collect_all_named_tensors(model)
 
-        # Step 2: Deduplicate by tensor identity and alias tracking
         id_to_names: Dict[int, List[str]] = {}
         id_to_tensor: Dict[int, torch.Tensor] = {}
 
@@ -105,33 +87,32 @@ class ParameterTools:
             else:
                 id_to_names[tid].append(name)
 
-        # Unique (canonical) parameter list
         self.named_params: List[Tuple[str, torch.Tensor]] = [
             (id_to_names[tid][0], tensor) for tid, tensor in id_to_tensor.items()
         ]
         self.params: List[torch.Tensor] = [tensor for _, tensor in self.named_params]
         self.shapes: List[torch.Size] = [p.shape for p in self.params]
 
-        # Alias resolution map (alias name → canonical name)
         self.alias_map: Dict[str, str] = {
             alias: names[0]
             for names in id_to_names.values()
             for alias in names
         }
 
-        # Index map for flattened view
         self.name_to_index_map: Dict[str, int] = self._build_flat_index_map()
-
 
     @staticmethod
     def flatten_tensor_list(tensors: Tuple[torch.Tensor]) -> torch.Tensor:
         """
-        Flattens any list of tensors into a 1D vector.
-        Useful for non-param objects like gradient lists.
+        Flattens a tuple or list of tensors into a single 1D vector.
         """
         return torch.cat([t.view(-1) for t in tensors])
 
     def _collect_all_named_tensors(self, obj: Any, prefix="") -> List[Tuple[str, torch.Tensor]]:
+        """
+        Recursively traverses the object and returns a list of (name, tensor) pairs
+        for all leaf tensors that require gradients. May contain duplicates.
+        """
         named_params = []
 
         if isinstance(obj, torch.Tensor):
@@ -154,26 +135,26 @@ class ParameterTools:
 
     def _build_flat_index_map(self) -> Dict[str, int]:
         """
-        Maps fully-qualified parameter element names to flat indices in the global flattened vector.
-        E.g., "clock.weight[3]" → 3
+        Maps fully qualified parameter names with index notation to flat indices.
+        E.g., "treecal.node_dates[3]" → global offset in the flat parameter vector.
         """
         name_map = {}
         offset = 0
         for name, param in self.named_params:
             for i in range(param.numel()):
-                name_map[f"{name}[{i}]"] = offset # + i
+                name_map[f"{name}[{i}]"] = offset
                 offset += 1
         return name_map
 
     def flatten_parameters(self) -> torch.Tensor:
         """
-        Returns a single 1D tensor by flattening all collected parameters.
+        Returns a flat 1D tensor of all unique parameters in order.
         """
         return torch.cat([p.view(-1) for p in self.params])
 
     def unflatten_vector(self, vec: torch.Tensor) -> List[torch.Tensor]:
         """
-        Given a flat vector, reshapes and returns it into the original parameter structure.
+        Given a flat vector, reshapes it back into the original parameter tensor shapes.
         """
         outputs = []
         offset = 0
@@ -185,30 +166,32 @@ class ParameterTools:
 
     def vector_to_parameter_list(self, vec: torch.Tensor) -> List[torch.Tensor]:
         """
-        Alias for unflatten_vector for interface compatibility.
+        Alias for unflatten_vector for naming compatibility.
         """
         return self.unflatten_vector(vec)
 
     def get_named_index(self, name_with_index: str) -> int:
         """
-        Returns the global flat index corresponding to a named parameter element (e.g., "clock.weight[2]").
+        Return flat vector index of a given parameter element.
+        Automatically resolves base name aliases.
         """
         base, idx = self.parse_name(name_with_index)
         canonical_base = self.resolve_alias(base)
         if idx is None:
-            # scalar
             return self.name_to_index_map[canonical_base]
-        else:
-            indexed_name = f"{canonical_base}[{idx}]"
-            return self.name_to_index_map[indexed_name]
+        indexed_name = f"{canonical_base}[{idx}]"
+        return self.name_to_index_map[indexed_name]
 
     def get_named_parameters(self) -> List[Tuple[str, torch.Tensor]]:
         """
-        Returns a list of (name, parameter) tuples.
+        Returns a list of unique (canonical_name, tensor) tuples.
         """
         return self.named_params
- 
-    def get_indexed_names(self)->List[str]:
+
+    def get_indexed_names(self) -> List[str]:
+        """
+        Returns a list of fully qualified parameter names with index notation.
+        """
         names = []
         for pname, tensor in self.named_params:
             if tensor.ndim == 0:
@@ -220,7 +203,8 @@ class ParameterTools:
 
     def normalize_name(self, name: str) -> str:
         """
-        Ensures scalar names like 'clock.log_rate' are mapped to 'clock.log_rate[0]' if needed.
+        Ensures consistent naming by resolving base aliases and adding [0] index if missing.
+        Useful for scalar tensors.
         """
         base, idx = self.parse_name(name)
         canonical_base = self.resolve_alias(base)
@@ -233,32 +217,35 @@ class ParameterTools:
 
     def parse_name(self, name: str) -> Tuple[str, int | None]:
         """
-        Parse a parameter name or indexed name.
-        Returns (base_name, optional index) where:
-        - "clock.weight[3]" → ("clock.weight", 3)
-        - "treecal.lengths" → ("treecal.lengths", None)
+        Splits a name like 'foo.bar[3]' into ('foo.bar', 3).
+        Returns index=None for scalars.
         """
         match = re.match(r"^(.*)\[(\d+)\]$", name)
         if match:
             return match.group(1), int(match.group(2))
         return name, None
-    
-    def get_accessor(self, name: str)->TensorAccessor:
+
+    def get_accessor(self, name: str) -> TensorAccessor:
+        """
+        Returns a TensorAccessor for a given parameter name (with or without alias).
+        """
         base, idx = self.parse_name(name)
         base = self.resolve_alias(base)
         param = dict(self.named_params)[base]
         return TensorAccessor(param, idx)
-    
+
     def resolve_alias(self, name: str) -> str:
+        """
+        Maps an alias name to its canonical name.
+        Works for base names and indexed names like 'foo.bar[2]'.
+        """
         if name in self.alias_map:
             return self.alias_map[name]
 
-        # If name includes an index, resolve alias on the base only
         match = re.match(r"^(.*)\[(\d+)\]$", name)
         if match:
             base, idx = match.groups()
             canonical_base = self.alias_map.get(base, base)
             return f"{canonical_base}[{idx}]"
 
-        # Otherwise, return unchanged
         return name
