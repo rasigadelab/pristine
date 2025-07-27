@@ -64,7 +64,7 @@ clock = ContinuousAdditiveRelaxedClock(
 # model = Model(clock=clock, treecal=treecal)
 loss_init = clock.loss().item()
 optim = pristine.optimize.Optimizer(clock)
-optim.reset_interval = 200
+# optim.reset_interval = 100
 
 start = time.perf_counter()
 optim.optimize()
@@ -83,4 +83,5 @@ node_ages_estim = treecal.node_dates.tolist()
 import pristine.plot
 pristine.plot.plot_compare(node_ages_ref, node_ages_estim, "Node dates, estimated")
 
+optim.plot_diagnostics()
 # %%

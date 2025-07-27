@@ -35,6 +35,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 from tqdm import tqdm
 from scipy.stats import norm
+import numpy as np
+import matplotlib.pyplot as plt
 
 class LikelihoodProfiler:
     """
@@ -135,20 +137,11 @@ class LikelihoodProfiler:
 
         # Fix the parameters by disabling gradient and setting value
         for name, value in fixed_params:
-            base, idx = pt.parse_name(name)
-            param = dict(pt.named_params)[base]
-            accessor = TensorAccessor(param, idx)
+            accessor = pt.get_accessor(name)
             accessor.set(value)
 
-            if param.requires_grad and reoptimize is True:
-                if idx is None or param.ndim == 0: # Scalar or full tensor
-                    param.requires_grad_(False)
-                else:
-                    def hook(grad):
-                            grad = grad.clone()
-                            grad[idx] = 0.0
-                            return grad
-                    param.register_hook(hook)
+            if accessor.tensor.requires_grad and reoptimize is True:
+                accessor.freeze()
 
         if reoptimize:
             # Optimize the rest
@@ -526,3 +519,75 @@ class LikelihoodProfiler:
             "top_min": top_min,
             "top_max": top_max
         }
+    
+    ###############################################################################
+    # PROFILES
+    ###############################################################################
+ 
+    def plot_profile_curve(self, name: str, span: float = 3.0, num_points: int = 50) -> None:
+        """
+        Plot the log-likelihood profile curve around the MLE for a given parameter,
+        using warm restarts for smoother convergence.
+
+        Args:
+            name: Fully-qualified parameter name (e.g., "clock.log_rate[0]").
+            span: Number of standard deviations around the MLE to evaluate.
+            num_points: Number of points in the curve.
+        """
+        import numpy as np
+        import matplotlib.pyplot as plt
+
+        center = self.pt.get_accessor(name).get()
+        variance = self.lap.estim_variance_by_name(name)
+
+        # Sanity check
+        if not torch.isfinite(variance).all() or (variance < 0).any():
+            warnings.warn(
+                f"Cannot compute profile for {name}: estimated variance is negative or NaN "
+                f"(variance = {variance.item():.4g}). The parameter may suffer from unidentifiability. "
+                f"You may want to run curvature diagnostics, see "
+                f"LikelihoodProfiler(my_model).curvature_report()"
+            )
+            return
+
+        stddev = variance.sqrt().item()
+
+        grid = torch.linspace(center - span * stddev, center + span * stddev, num_points)
+        logL = []
+
+        print(f"Profiling likelihood around: {name} (MLE = {center:.4f}, std = {stddev:.4f})")
+
+        # Start from optimized model
+        model_working = self._copy_model()
+        pt_working = ParameterTools(model_working)
+
+        for i, val in enumerate(grid):
+            accessor = pt_working.get_accessor(name)
+            accessor.set(val.item())
+            accessor.freeze()
+
+            try:
+                opt = Optimizer(model_working, initial_lr=0.05, max_iterations=200)
+                opt.optimize()
+                loss = model_working.loss().item()
+            except RuntimeError:
+                loss = float("nan")
+
+            logL.append(-loss)
+
+        # Normalize log-likelihood
+        logL = np.array(logL)
+        logL -= np.nanmax(logL)
+
+        # Plot
+        plt.figure(figsize=(6, 4))
+        plt.plot(grid.numpy(), logL, label="Profile log-likelihood", lw=2)
+        plt.axhline(y=-0.5 * stats.chi2.ppf(0.95, df=1), color='red', linestyle='--', label="95% threshold")
+        plt.axvline(x=center, color='black', linestyle=':', label="MLE")
+        plt.xlabel(name)
+        plt.ylabel("Relative log-likelihood")
+        plt.title(f"Likelihood profile for {name}")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.draw()

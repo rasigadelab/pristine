@@ -49,13 +49,28 @@ class TensorAccessor:
             else:
                 self.tensor[self.index] = value
 
-    def zero_grad(self):
-        if self.tensor.grad is not None:
-            with torch.no_grad():
-                if self.index is None:
-                    self.tensor.grad.zero_()
-                else:
-                    self.tensor.grad[self.index] = 0.0
+    # def zero_grad(self):
+    #     if self.tensor.grad is not None:
+    #         with torch.no_grad():
+    #             if self.index is None:
+    #                 self.tensor.grad.zero_()
+    #             else:
+    #                 self.tensor.grad[self.index] = 0.0
+
+    def freeze(self):
+        """
+        Prevent gradient updates for the accessed parameter element.
+        - Scalars or full tensors: disables requires_grad.
+        - Indexed elements: installs a hook to zero their gradient.
+        """
+        if self.index is None or self.tensor.ndim == 0:
+            self.tensor.requires_grad_(False)
+        else:
+            def hook(grad):
+                grad = grad.clone()
+                grad[self.index] = 0.0
+                return grad
+            self.tensor.register_hook(hook)
 
 
 class ParameterTools:

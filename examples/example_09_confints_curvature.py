@@ -56,7 +56,7 @@ print(f"Log rate CI, Laplace, [{L_lap: .2e}, {U_lap: .2e}]")
 print(f"Log rate CI, profile, [{L_prof: .2e}, {U_prof: .2e}]")
 
 profiler.estimate_confints("log_rate", method="laplace")
-# profiler.estimate_confints(["log_rate"], method="profile")
+# profiler.estimate_µconfints(["log_rate"], method="profile")
 
 profiler.estimate_confints_parallel(method="laplace")
 # profiler.estimate_all_confints_laplace(dense=False, num_samples=100)
@@ -68,3 +68,5 @@ profiler.estimate_all_confints_laplace()
 #########################################################################
 
 _ = profiler.curvature_report(top_k=3)
+
+# %%

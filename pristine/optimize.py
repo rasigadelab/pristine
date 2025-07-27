@@ -27,61 +27,48 @@ from .parameter_tools import ParameterTools
 
 class Optimizer:
     """
-    Adaptive gradient-based optimizer using Adam with loss-aware backtracking.
+    Adaptive Adam-based optimizer with automatic backtracking and restart strategies.
 
-    This class performs robust optimization of a differentiable model's parameters by
-    minimizing its `.loss()` method using the Adam algorithm. It is specifically designed
-    for statistical models with sharp or non-convex likelihood surfaces, such as those
-    encountered in phylogenetics or probabilistic inference.
+    This optimizer minimizes a model's `.loss()` function using gradient-based updates
+    with the Adam algorithm. It is specifically designed for statistical models with
+    irregular or stiff objective landscapes, such as those arising in likelihood-based
+    phylogenetics or differentiable probabilistic models.
 
-    The optimizer incorporates backtracking logic: if a step leads to a non-finite or
-    worse loss, it reverts the update and reduces the learning rate until the step becomes
-    acceptable. This prevents divergence due to unstable gradients and improves convergence
-    in irregular objective landscapes.
-
-    Optimization stops when:
-        - The loss stabilizes (i.e., the change is below `convergence_threshold`),
-        - The learning rate falls below `min_lr`,
-        - Or the maximum number of iterations (`max_iterations`) is reached.
+    Key features:
+    - Loss-aware backtracking: reverts steps and reduces learning rate if loss increases
+      or becomes non-finite, ensuring robustness to poor gradients or oversteps.
+    - Restarts: supports multiple forms of restarts (fixed interval, stagnation-triggered,
+      and post-convergence restarts) to escape plateaus or recover from small step sizes.
+    - Learning rate adaptation: gradual reacceleration of learning rate after successful steps.
+    - Full tracking of loss and learning rate trajectories for diagnostic visualization.
 
     Parameters:
-        model (Any):
-            The model instance to optimize. Must define a `.loss()` method and contain
-            differentiable leaf parameters (typically via `requires_grad=True`).
-
-        initial_lr (float, default=0.1):
-            Initial learning rate for the Adam optimizer.
-
-        backtrack_enable (bool, default=True):
-            Whether to enable backtracking if the loss increases or becomes non-finite.
-
-        backtrack_factor (float, default=0.9):
-            Multiplicative factor by which to reduce learning rate during backtracking.
-
-        lr_accel_decel_factor (float, default=0.5):
-            Factor governing how quickly the learning rate recovers after backtracking.
-
-        min_lr (float, default=1e-6):
-            Minimum learning rate. Optimization halts if learning rate drops below this.
-
-        max_iterations (int, default=1000):
-            Maximum number of optimization iterations.
-
-        print_interval (int, default=100):
-            Interval at which to print progress (prints a dot).
-
-        convergence_threshold (float, default=0.001):
-            Threshold for loss change to consider convergence.
+        model (Any): Differentiable model with a `.loss()` method and leaf parameters.
+        initial_lr (float): Starting learning rate for Adam (default 0.1).
+        backtrack_enable (bool): Whether to backtrack on bad steps (default True).
+        backtrack_factor (float): LR shrink factor during backtracking (default 0.9).
+        lr_accel_decel_factor (float): Controls LR reacceleration (default 0.5).
+        min_lr (float): Minimum allowable learning rate (default 1e-6).
+        max_iterations (int): Maximum number of optimization iterations (default 1000).
+        print_interval (int): Frequency of progress dots (default every 100 steps).
+        convergence_threshold (float): Loss change threshold for convergence (default 0.001).
 
     Attributes:
-        parameters (List[torch.Tensor]):
-            List of model parameters to optimize (discovered via `ParameterTools`).
-        num_iter (int):
-            Counter tracking the number of completed iterations.
+        num_iter (int): Current iteration number.
+        loss_history (List[float]): Per-iteration loss values.
+        lr_history (List[float]): Per-iteration learning rates.
+        restart_iters (List[int]): Iterations where full restarts occurred.
+        backtrack_iters (List[int]): Iterations where any backtracking occurred.
 
-    Returns:
+    Methods:
         optimize() -> List[torch.Tensor]:
-            The list of optimized parameters (in-place modification of the model).
+            Perform in-place optimization of model parameters, returns final parameter list.
+
+        reset_optimizer():
+            Fully resets the internal Adam state and learning rate.
+
+        plot_diagnostics():
+            Visualize the loss and learning rate over time, with markers for restarts/backtracking.
     """
     def __init__(
         self,
@@ -122,13 +109,12 @@ class Optimizer:
         self.backtrack_counter = 0
         self.loss_history = []       # Store loss
         self.lr_history = []         # Store learning rate per iteration
-        self.restart_count = -1
+        self.restart_count = 0
         self.restart_iters = []      # Iterations at which restarts occurred
         self.backtrack_iters = []    # Iterations where any backtracking was triggered
         self.convergence_restart_count = 0
 
         self.optimizer = torch.optim.Adam(self.pt.params, lr=self.initial_lr)
-        # self.reset_optimizer()
 
     def reset_optimizer(self) -> None:
         """
