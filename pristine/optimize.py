@@ -80,7 +80,8 @@ class Optimizer:
         min_lr: float = 1e-6,
         max_iterations: int = 1000,
         print_interval: int = 100,
-        convergence_threshold: float = 0.001
+        convergence_threshold: float = 0.001,
+        verbosity_level: int = 1
     ):
         self.model = model
         self.pt = ParameterTools(model)
@@ -94,6 +95,7 @@ class Optimizer:
         self.max_iterations = max_iterations
         self.print_interval = print_interval
         self.convergence_threshold = convergence_threshold
+        self.verbosity_level = verbosity_level
 
         # Optimizer reset/restart control
         self.reset_interval = 500
@@ -127,7 +129,8 @@ class Optimizer:
         self.backtrack_counter = 0
         self.restart_count += 1
         self.restart_iters.append(self.num_iter)
-        print("_", end="", flush=True)
+        if self.verbosity_level == 1:
+            print("_", end="", flush=True)
 
     def optimize(self) -> List[torch.Tensor]:
         """
@@ -169,7 +172,7 @@ class Optimizer:
                         using torch.autograd.set_detect_anomaly(True)")                
 
             # Print progress at given intervals
-            if self.num_iter % self.print_interval == 0:
+            if self.num_iter % self.print_interval == 0 and self.verbosity_level == 1:
                 print(".", end="", flush=True)
 
             # Store old values of parameters
@@ -200,13 +203,16 @@ class Optimizer:
                     if param_group['lr'] < self.min_lr:
                         if self.lr_restart_count < self.max_lr_restarts:
                             self.lr_restart_count += 1
-                            print("!", end="", flush=True)
-                            # print(f"\n[Restart] LR fell below min_lr at iter {self.num_iter}, restarting...")
+                            if self.verbosity_level == 1:
+                                print("!", end="", flush=True)
+                            elif self.verbosity_level == 2:
+                                print(f"\n[Restart] LR fell below min_lr at iter {self.num_iter}, restarting...")
                             self.reset_optimizer()
                             continue  # restart optimization from scratch
                         else:
                             # We're really stuck...
-                            print("/!\\", end="", flush=True)
+                            if self.verbosity_level == 1:
+                                print("/!\\", end="", flush=True)
                             return self.pt.params
 
                 # Revert parameters to old values
@@ -262,21 +268,22 @@ class Optimizer:
                     # print(">", end="", flush=True)
                     continue  # Resume optimization from restart
                 else:
-                    print(">", end="", flush=True)
-                    # print(f"\n[Info] Converged after {self.num_iter + 1} iterations "
-                        # f"with {self.convergence_restart_count} convergence restarts.")
+                    if self.verbosity_level == 1:
+                        print(">", end="", flush=True)
+                    elif self.verbosity_level == 2:
+                        print(f"\n[Info] Converged after {self.num_iter + 1} iterations "
+                                f"with {self.convergence_restart_count} convergence restarts.")
                     break
 
-
-            # Restore the learning rate partially (per original code: dividing by backtrack_factor**0.5)
+            # (re)-accelerate learning rate
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] /= (self.backtrack_factor ** self.lr_accel_decel_factor)
 
-                # if param_group['lr'] < self.initial_lr:
-                #     param_group['lr'] /= (self.backtrack_factor ** self.lr_accel_decel_factor)
-
         return self.pt.params
 
+    #############################################################################
+    # CONVERGENCE DIAGNOSTICS
+    #############################################################################
     def plot_diagnostics(self):
         """
         Plot loss and learning rate trajectories over iterations,
@@ -319,4 +326,4 @@ class Optimizer:
         # --- Final layout
         fig.tight_layout()
         plt.title("Loss, Learning Rate, and Restart/Backtrack Diagnostics")
-        plt.show()
+        plt.draw()

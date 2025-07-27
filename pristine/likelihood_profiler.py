@@ -544,7 +544,7 @@ class LikelihoodProfiler:
         if not torch.isfinite(variance).all() or (variance < 0).any():
             warnings.warn(
                 f"Cannot compute profile for {name}: estimated variance is negative or NaN "
-                f"(variance = {variance.item():.4g}). The parameter may suffer from unidentifiability. "
+                f"(variance = {variance.item():.4g}). The parameter may be unidentifiable. "
                 f"You may want to run curvature diagnostics, see "
                 f"LikelihoodProfiler(my_model).curvature_report()"
             )
@@ -587,6 +587,80 @@ class LikelihoodProfiler:
         plt.xlabel(name)
         plt.ylabel("Relative log-likelihood")
         plt.title(f"Likelihood profile for {name}")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.draw()
+
+    def plot_profile_surface(
+        self,
+        name1: str,
+        name2: str,
+        span: float = 2.0,
+        num_points: int = 10
+    ) -> None:
+        """
+        Plot the 2D likelihood profile surface for two parameters,
+        using warm restarts and fixed grid evaluation.
+
+        Args:
+            name1: First parameter name (e.g. "clock.log_rate[0]")
+            name2: Second parameter name
+            span: Number of stddevs to span from MLE for both parameters
+            num_points: Grid resolution along each dimension, default=10 (coarse)
+        """
+        import numpy as np
+        import matplotlib.pyplot as plt
+        import warnings
+
+        center1 = self.pt.get_accessor(name1).get()
+        center2 = self.pt.get_accessor(name2).get()
+        var1 = self.lap.estim_variance_by_name(name1)
+        var2 = self.lap.estim_variance_by_name(name2)
+
+        if not torch.isfinite(var1).all() or (var1 < 0).any() or not torch.isfinite(var2).all() or (var2 < 0).any():
+            warnings.warn(f"Cannot compute profile for {name1} and {name2}: variance is invalid. Run curvature_report().")
+            return
+
+        std1 = var1.sqrt().item()
+        std2 = var2.sqrt().item()
+
+        grid1 = torch.linspace(center1 - span * std1, center1 + span * std1, num_points)
+        grid2 = torch.linspace(center2 - span * std2, center2 + span * std2, num_points)
+
+        Z = np.full((num_points, num_points), np.nan)
+
+        model_working = self._copy_model()
+        pt_working = ParameterTools(model_working)
+
+        for i, v1 in enumerate(grid1):
+            for j, v2 in enumerate(grid2):
+                acc1 = pt_working.get_accessor(name1)
+                acc2 = pt_working.get_accessor(name2)
+                acc1.set(v1.item())
+                acc2.set(v2.item())
+                acc1.freeze()
+                acc2.freeze()
+
+                try:
+                    opt = Optimizer(model_working, initial_lr=0.05, max_iterations=200)
+                    opt.optimize()
+                    Z[i, j] = -model_working.loss().item()
+                except RuntimeError:
+                    Z[i, j] = np.nan
+
+        # Normalize
+        Z -= np.nanmax(Z)
+
+        # Plot
+        X, Y = torch.meshgrid(grid1, grid2, indexing='ij')
+        plt.figure(figsize=(6, 5))
+        contour = plt.contourf(X.numpy(), Y.numpy(), Z, levels=40, cmap='viridis')
+        plt.colorbar(contour, label="Relative log-likelihood")
+        plt.scatter([center1], [center2], color='red', label='MLE', zorder=10)
+        plt.xlabel(name1)
+        plt.ylabel(name2)
+        plt.title(f"Likelihood profile surface: {name1} vs {name2}")
         plt.legend()
         plt.grid(True)
         plt.tight_layout()
