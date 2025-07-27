@@ -230,9 +230,9 @@ class LikelihoodProfiler:
         return lower, upper
 
     @staticmethod
-    def get_delta_log_likelihood(confidence_level=0.95, dof=1)->float:
+    def get_delta_log_likelihood(confidence_level=0.95, df=1)->float:
         # For profiling: use chi-square threshold
-        chi2_threshold = stats.chi2.ppf(confidence_level, df=1)
+        chi2_threshold = stats.chi2.ppf(confidence_level, df=df)
         delta_logL = 0.5 * chi2_threshold
         return delta_logL
 
@@ -596,22 +596,24 @@ class LikelihoodProfiler:
         self,
         name1: str,
         name2: str,
-        span: float = 2.0,
-        num_points: int = 10
+        span: float = 2.5,
+        num_points: int = 10,
+        confidence_level: float = 0.95
     ) -> None:
         """
         Plot the 2D likelihood profile surface for two parameters,
-        using warm restarts and fixed grid evaluation.
+        using warm restarts and drawing the 95% confidence contour.
 
         Args:
             name1: First parameter name (e.g. "clock.log_rate[0]")
             name2: Second parameter name
             span: Number of stddevs to span from MLE for both parameters
-            num_points: Grid resolution along each dimension, default=10 (coarse)
+            num_points: Grid resolution along each dimension
         """
         import numpy as np
         import matplotlib.pyplot as plt
         import warnings
+        from scipy.stats import chi2
 
         center1 = self.pt.get_accessor(name1).get()
         center2 = self.pt.get_accessor(name2).get()
@@ -629,7 +631,6 @@ class LikelihoodProfiler:
         grid2 = torch.linspace(center2 - span * std2, center2 + span * std2, num_points)
 
         Z = np.full((num_points, num_points), np.nan)
-
         model_working = self._copy_model()
         pt_working = ParameterTools(model_working)
 
@@ -641,7 +642,6 @@ class LikelihoodProfiler:
                 acc2.set(v2.item())
                 acc1.freeze()
                 acc2.freeze()
-
                 try:
                     opt = Optimizer(model_working, initial_lr=0.05, max_iterations=200)
                     opt.optimize()
@@ -649,19 +649,33 @@ class LikelihoodProfiler:
                 except RuntimeError:
                     Z[i, j] = np.nan
 
-        # Normalize
         Z -= np.nanmax(Z)
 
-        # Plot
+        conf_threshold = -LikelihoodProfiler.get_delta_log_likelihood(
+            confidence_level, df=2
+            )
+
         X, Y = torch.meshgrid(grid1, grid2, indexing='ij')
         plt.figure(figsize=(6, 5))
         contour = plt.contourf(X.numpy(), Y.numpy(), Z, levels=40, cmap='viridis')
         plt.colorbar(contour, label="Relative log-likelihood")
-        plt.scatter([center1], [center2], color='red', label='MLE', zorder=10)
+
+        # Draw contour line
+        plt.contour(
+            X.numpy(), Y.numpy(), Z,
+            levels=[conf_threshold],
+            colors='black',
+            linewidths=1.
+        )
+
+        # Add MLE point
+        plt.scatter([center1], [center2], color='white', edgecolors='black', s=50, label='MLE', zorder=10)
+
         plt.xlabel(name1)
         plt.ylabel(name2)
-        plt.title(f"Likelihood profile surface: {name1} vs {name2}")
+        plt.title(f"Likelihood surface and {int(confidence_level*100)}%CI")
         plt.legend()
         plt.grid(True)
         plt.tight_layout()
         plt.draw()
+
