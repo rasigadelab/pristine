@@ -149,6 +149,36 @@ class TreeTimeCalibrator:
         node_id_to_local[self.node_indices] = torch.arange(self.nnodes(), dtype=torch.long)
         return node_id_to_local[self.children]
 
+    # def reroot_along_edge(self, edge_index: int, alpha: float) -> "TreeTimeCalibrator":
+    #     """
+    #     Return a new TreeTimeCalibrator rerooted along the given edge at fractional position alpha.
+    #     """
+    #     assert 0 < alpha < 1, "alpha must be in (0,1) for valid edge split"
+    #     import copy
+
+    #     new_tree = copy.deepcopy(self)
+
+    #     L = new_tree.parents[edge_index].item()
+    #     R = new_tree.children[edge_index].item()
+    #     w = new_tree.edge_lengths[edge_index].item()
+    #     wL, wR = w * alpha, w * (1 - alpha)
+
+    #     # New root node index
+    #     root = new_tree.numnodes()
+    #     new_tree.add_node()  # adds one new internal node
+
+    #     # Remove original edge
+    #     new_tree.parents[edge_index] = -1  # mark as detached
+    #     new_tree.children[edge_index] = -1
+
+    #     # Add two edges: L → root and root → R
+    #     new_tree.add_edge(L, root, length=wL)
+    #     new_tree.add_edge(root, R, length=wR)
+
+    #     # Set root
+    #     new_tree.set_root(root)
+    #     return new_tree
+
 
 class EdgeList:
     """
@@ -230,10 +260,6 @@ class EdgeList:
 
     def plot(self)->None:
         from Bio import Phylo
-        # from io import StringIO
-        # newick_str = self.newick()
-        # handle = StringIO(newick_str)
-        # tree = Phylo.read(handle, "newick")
         tree = self.as_Phylo()
         Phylo.draw(tree, do_show=False)
 
@@ -403,3 +429,42 @@ class EdgeList:
         edges = [e for e in zip(treecal.parents.tolist(), treecal.children.tolist())]
         edge_lengths = treecal.durations().tolist()
         return EdgeList(edges, edge_lengths)
+    
+    # UNTESTED
+    def reroot_along_edge(self, edge_index: int, alpha: float) -> "EdgeList":
+        """
+        Return a new EdgeList rerooted at fractional position alpha along a given edge.
+
+        Args:
+            edge_index: index of edge to split
+            alpha: fraction along edge (0 < alpha < 1)
+
+        Returns:
+            New EdgeList with root inserted along specified edge
+        """
+        assert 0 < alpha < 1, "alpha must be strictly between 0 and 1"
+
+        import copy
+        newtree = copy.deepcopy(self)
+
+        L = newtree.parents[edge_index].item()
+        R = newtree.children[edge_index].item()
+        w = newtree.edge_lengths[edge_index].item()
+        wL, wR = alpha * w, (1 - alpha) * w
+
+        # Create a new internal node to serve as the root
+        root = newtree.numnodes()
+        newtree.add_node()
+
+        # Remove the original edge by marking it detached
+        newtree.parents[edge_index] = -1
+        newtree.children[edge_index] = -1
+        newtree.edge_lengths[edge_index] = 0.0
+
+        # Add edges L → root and root → R
+        newtree.add_edge(L, root, length=wL)
+        newtree.add_edge(root, R, length=wR)
+
+        # Set the new root
+        newtree.set_root(root)
+        return newtree
