@@ -3,6 +3,30 @@ from typing import Any, Dict
 
 
 class IOTools:
+    """
+    Utility for serializing and restoring the internal state of an object to/from disk.
+
+    This tool recursively traverses all attributes of a model object (including nested classes,
+    dictionaries, lists, and tensors), extracts scalar values and tensors into a flat dictionary,
+    and enables saving/loading of the state using PyTorch's `.pt` format.
+
+    Use cases:
+        - Checkpointing model state across training runs
+        - Serializing fitted parameter values
+        - Exporting models for reproducible inference or evaluation
+
+    Attributes:
+        obj (Any): The target object whose state is being saved or restored.
+        filename (str): Path to the file used for saving/loading state.
+        state (Dict[str, Any]): Flattened dictionary representing the object's state.
+
+    Notes:
+        - Tensor values are cloned and detached when saved.
+        - Scalars (int, float, bool, str) and scalar tensors are stored as native Python types.
+        - During loading, tensor shapes are preserved, and scalar tensors are restored in-place
+          when possible.
+        - Key format is dot-qualified for attributes and indexed for sequences (e.g., 'foo.bar[0].weight').
+    """
     def __init__(self, obj: Any, filename: str):
         self.obj: Any = obj
         self.filename: str = filename
@@ -87,7 +111,18 @@ class IOTools:
 
     def save(self) -> None:
         """
-        Save model state (tensors + scalars) to a .pt file.
+        Save the object's current state to disk.
+
+        This method traverses all nested components of the target object (`self.obj`), 
+        extracts scalar and tensor values into a flat dictionary, and saves the result 
+        as a `.pt` file at `self.filename`.
+
+        File format:
+            The saved file is a PyTorch checkpoint containing all model parameters
+            and scalars, suitable for later reloading using the `load()` method.
+
+        Raises:
+            IOError: If saving to the specified path fails.
         """
         self.state = self.extract_state()
         torch.save(self.state, self.filename)
@@ -95,7 +130,19 @@ class IOTools:
 
     def load(self) -> None:
         """
-        Load model state from a .pt file into the provided object.
+        Load the object's state from a `.pt` file.
+
+        This method reads the flattened dictionary stored at `self.filename`,
+        and reassigns the values into the corresponding fields of `self.obj`.
+
+        Behavior:
+            - Tensors are restored using in-place `.copy_()` when possible.
+            - Scalar tensors with one element are filled using `.fill_()`.
+            - Non-tensor fields (ints, floats, strings, etc.) are directly reassigned.
+
+        Raises:
+            FileNotFoundError: If the specified file does not exist.
+            ValueError: If the target object does not support a corresponding attribute path.
         """
         self.state = torch.load(self.filename, weights_only=True)
         self.load_state()
