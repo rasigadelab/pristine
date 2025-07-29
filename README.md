@@ -4,6 +4,8 @@
 
 See [PRISTINE documentation](https://rasigadelab.github.io/pristine/) for more details.
 
+**/!\\** The framework is in early stages of development. API may change without warning. **/!\\** 
+
 ---
 
 ## Goals and Features
@@ -24,18 +26,12 @@ PRISTINE is designed to:
 
 > **Requirements:** Python ≥ 3.10, PyTorch ≥ 2.6
 
-You can install PRISTINE locally in development mode:
+To install PRISTINE in your environment, run:
 
 ```bash
 git clone https://github.com/your-org/pristine.git
 cd pristine
-pip install -e .
-```
-
-Or via `requirements.txt` (if provided):
-
-```bash
-pip install -r requirements.txt
+pip install .
 ```
 
 ---
