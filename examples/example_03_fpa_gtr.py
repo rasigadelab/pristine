@@ -16,17 +16,21 @@ n = 60
 root: BinaryTreeNode=BinaryTreeNode().grow_aldous_tree(n)
 
 # Simulate DNA sequence along the random tree
-from pristine.gtr import GeneralizedTimeReversibleModel
 from pristine.sequence import SequenceSimulationVisitor
+from pristine.molecularclock import ConstantClock
+from pristine.substitution_models import GTRModel
 
 # Generate a random 4-state GTR model
 num_states = 4
-gtr = GeneralizedTimeReversibleModel(num_states)
-gtr.rates_log -= 8.0 # Default rates are too fast, signal saturates
+subst_model_ref = GTRModel(num_states)
+subst_model_ref.free_rates_log = torch.randn(subst_model_ref.num_free_rates())
+subst_model_ref.stationary_logits = torch.randn(num_states - 1)
+
+clock_ref = ConstantClock(torch.tensor(-8.))
 
 # Prepare sequence simulation visitor and apply on all descendents of the root
 sequence_length = 100000
-visitor = SequenceSimulationVisitor(gtr, sequence_length)
+visitor = SequenceSimulationVisitor(clock_ref, subst_model_ref, sequence_length)
 root.bfs(visitor)
        
 #########################################################################
@@ -42,13 +46,13 @@ markers = CollapsedConditionalLikelihood(collector.sequences)
 # Consolidated tree structure with edges etc. The _fixed suffix implies
 # that edge lengths are fixed (known)
 treecal = root.edgelist().get_tree_time_calibrator_fixed()
-# Random starting point for GTR model. Use .requires_grad_(True) on
-# parameters to make them trainable.
-gtr_optim = GeneralizedTimeReversibleModel(num_states)
-gtr_optim.stationary_logits.requires_grad_(True)
-gtr_optim.rates_log -= 4 # Don't start too far from the objective
-gtr_optim.rates_log.requires_grad_(True)
-fpa = FelsensteinPruningAlgorithm(gtr_optim, markers, treecal)
+
+# Define clock and substitution models
+clock = ConstantClock()
+clock.log_rate = torch.tensor(-5.).requires_grad_()
+subst_model_test = GTRModel(num_states)
+
+fpa = FelsensteinPruningAlgorithm(subst_model_test, markers, treecal, clock)
 
 #########################################################################
 # OPTIMIZE AND PRINT RESULTS
@@ -73,15 +77,9 @@ print(f"Final loss={fpa.loss().item():.3e}")
 print(f"Elapsed time: {stop - start:.3f}s")
 print(f"No. of iterations: {optim.num_iter}")
 
-Q, pi = gtr.rate_matrix_stationary_dist()
-Q_hat, pi_hat = gtr_optim.rate_matrix_stationary_dist()
-
-# print(pi.tolist())
-# print(pi_hat.tolist())
-
-# print(Q)
-# print(Q_hat)
+Q, pi = subst_model_ref.rate_matrix_stationary_dist()
+Q_hat, pi_hat = subst_model_test.rate_matrix_stationary_dist()
 
 from pristine.plot import plot_compare
 plot_compare(pi.tolist(), pi_hat.tolist(), "Steady state distribution")
-plot_compare(gtr.rates_log.tolist(), gtr_optim.rates_log.tolist(), "Exchange rates")
+plot_compare(subst_model_ref.free_rates_log.tolist(), subst_model_test.free_rates_log.tolist(), "Exchange rates")

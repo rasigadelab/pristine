@@ -11,7 +11,9 @@ print("Simulating data...")
 from pristine.binarytree import BinaryTreeNode
 from pristine.bds_model import BirthDeathSamplingNodeData, BirthDeathSamplingSimulator
 from pristine.sequence import SequenceNodeData, SequenceSimulationVisitor
-from pristine.gtr import GeneralizedTimeReversibleModel
+# from pristine.gtr import GeneralizedTimeReversibleModel
+from pristine.substitution_models import GTRModel
+from pristine.molecularclock import ConstantClock
 
 # Combine BDS and sequence data in a single forward simulator
 class StatefulBDSNodeData(BirthDeathSamplingNodeData, SequenceNodeData):
@@ -48,10 +50,10 @@ class StatefulBDSSimulationVisitor:
 # Generate a random 2-state GTR model
 num_states = 2
 sequence_length = 1
-gtr = GeneralizedTimeReversibleModel(num_states)
-gtr.rates_log -= 2.0 # Default rates are too fast, signal saturates
 
-sequence_visitor = SequenceSimulationVisitor(gtr)
+subst_model_ref = GTRModel(num_states)
+clock_ref = ConstantClock(torch.tensor(-2.))
+sequence_visitor = SequenceSimulationVisitor(clock_ref, subst_model_ref)
 
 # Start with root in state zero. Preserve dimension (K, L) where L is 1
 root: BinaryTreeNode=BinaryTreeNode()
@@ -147,13 +149,10 @@ markers = CollapsedConditionalLikelihood(collector.sequences)
 # that edge lengths are fixed (known)
 treecal = root.edgelist().get_tree_time_calibrator_fixed()
 
-# Random starting point for GTR model. Use .requires_grad_(True) on
-# parameters to make them trainable.
-gtr_optim = GeneralizedTimeReversibleModel(num_states)
-gtr_optim.stationary_logits.requires_grad_(True)
-gtr_optim.rates_log -= 4 # Don't start too far from the objective
-gtr_optim.rates_log.requires_grad_(True)
-fpa = FelsensteinPruningAlgorithm(gtr_optim, markers, treecal)
+# Define clock and substitution models
+clock = ConstantClock()
+subst_model_test = GTRModel(num_states)
+fpa = FelsensteinPruningAlgorithm(subst_model_test, markers, treecal, clock)
 
 # BDS with a single sampling parameter
 bds = StateDependentBirthDeathSampling(treecal, fpa.ancestor_states)

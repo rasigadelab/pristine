@@ -56,6 +56,7 @@ from typing import Dict
 
 from .binarytree import BinaryTreeNode
 from .gtr import GeneralizedTimeReversibleModel
+from .molecularclock import ConstantClock
 
 #########################################################################
 # SEQUENCE SIMULATION (PYTHON SIDE)
@@ -80,15 +81,20 @@ class SequenceNodeData:
         return self.sequence.argmax(dim=-1)
 
 class SequenceSimulationVisitor(BinaryTreeNode.Visitor):
-    
-    def __init__(self, 
+    """
+    Simulate a sequence of markers. Currently supports a constant rate.
+    """
+    def __init__(self,
+                 clock: ConstantClock,
                  transition_model: GeneralizedTimeReversibleModel, 
                  sequence_length: int = 1):
+        self.clock = clock
         self.sequence_length: int = sequence_length
         self.transition_model: GeneralizedTimeReversibleModel = transition_model
         Q, pi = transition_model.rate_matrix_stationary_dist()
         self.transition_matrix: torch.Tensor = Q
         self.stationary_distribution: torch.Tensor = pi
+        self.clock_rate = clock.rate()
 
     def visit(self, node: BinaryTreeNode)->None:
         if node.data is None:
@@ -105,7 +111,9 @@ class SequenceSimulationVisitor(BinaryTreeNode.Visitor):
         else:            
             # Compute the transition probability matrix P(t)
             waiting_time = node.time - node.parent.time
-            P = torch.matrix_exp(self.transition_matrix * waiting_time)  # shape: (K, K)
+            P = torch.matrix_exp(
+                self.transition_matrix * waiting_time * self.clock_rate
+                )  # shape: (K, K)
             
             # For each site, find the parent's state index
             # (since parent_seq is one-hot, argmax gives the state index)

@@ -62,12 +62,12 @@ import sys;import os;sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 from concurrent.futures import ThreadPoolExecutor
 import torch
 import torch.nn.functional as F
-from typing import List
+from typing import List, Any, Optional
 
 from .edgelist import TreeTimeCalibrator
 from .gtr import GeneralizedTimeReversibleModel
 from .sequence import CollapsedConditionalLikelihood
-
+from .molecularclock import ConstantClock
 
 @torch.jit.script
 def get_postorder_edge_list(treecal: TreeTimeCalibrator):
@@ -105,11 +105,13 @@ class FelsensteinPruningAlgorithm:
     """
     TorchScript class for FPA.
     """
-    def __init__(self, 
+    def __init__(self,
                  substitution_model: GeneralizedTimeReversibleModel, 
                  markers: CollapsedConditionalLikelihood,
-                 treecal: TreeTimeCalibrator):
+                 treecal: TreeTimeCalibrator,
+                 clock: Optional[ConstantClock] = None):
         self.eps = 1e-16
+        self.clock: ConstantClock = clock if clock is not None else ConstantClock()
         self.substitution_model: GeneralizedTimeReversibleModel = substitution_model
         self.markers: CollapsedConditionalLikelihood = markers
         self.ancestor_states: torch.Tensor = markers.unique_patterns.clone().detach()
@@ -133,7 +135,8 @@ class FelsensteinPruningAlgorithm:
         # ------------------------------------------------------------------
         # Transition matrices for every edge  -----------------------------
         durations = self.treecal.durations().clamp_min_(0.)
-        P_batch   = self.substitution_model.compute_batch_matrix_exp(durations)  # (E,K,K)
+        scaled_durations = durations * self.clock.rate()
+        P_batch   = self.substitution_model.compute_batch_matrix_exp(scaled_durations)  # (E,K,K)
 
         # ------------------------------------------------------------------
         # Initialise per‑node conditional likelihoods ---------------------

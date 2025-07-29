@@ -53,28 +53,14 @@ model parameters directly from observed data.
 import torch
 import torch.nn.functional as F
 from typing import Optional, Tuple
-
-@torch.jit.script
-def softmax_with_fixed_zero(logits_rest: torch.Tensor) -> torch.Tensor:
-    """
-    Computes a softmax over logits where the first category is fixed to 0.
-
-    Args:
-        logits_rest (Tensor): shape (K-1,), logit values for categories 1..K-1
-
-    Returns:
-        Tensor: shape (K,), probability vector with first prob tied to 0-logit
-    """
-    exp_rest = logits_rest.exp()
-    denom = 1.0 + exp_rest.sum()
-    probs = torch.cat([
-        torch.tensor([1.0], device=logits_rest.device, dtype=logits_rest.dtype),
-        exp_rest
-    ]) / denom
-    return probs
+from . import distribution as D
 
 @torch.jit.script
 class GeneralizedTimeReversibleModel:
+    """
+    A clock-free GTR model for use with raw durations. Do not use with
+    durations rescaled by a free clock parameters.
+    """
     def __init__(self,
                  K: int,
                  rates_log: Optional[torch.Tensor] = None, 
@@ -90,7 +76,7 @@ class GeneralizedTimeReversibleModel:
 
     def stationary_dist(self)->torch.Tensor:
         # return F.softmax(self.stationary_logits, dim=0)
-        return softmax_with_fixed_zero(self.stationary_logits)
+        return D.softmax_with_fixed_zero(self.stationary_logits)
     
     def rate_matrix_stationary_dist(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """

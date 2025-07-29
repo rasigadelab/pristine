@@ -50,3 +50,22 @@ def JC69_probability(t: torch.Tensor, K: torch.Tensor) -> torch.Tensor:
     Compute p(x) = (K-1)/K * (1 - exp(- (K/(K-1))*x))
     """
     return (K - 1.0) / K * (1.0 - torch.exp(- (K / (K - 1.0)) * t))
+
+@torch.jit.script
+def softmax_with_fixed_zero(logits_rest: torch.Tensor) -> torch.Tensor:
+    """
+    Computes a softmax over logits where the first category is fixed to 0.
+
+    Args:
+        logits_rest (Tensor): shape (K-1,), logit values for categories 1..K-1
+
+    Returns:
+        Tensor: shape (K,), probability vector with first prob tied to 0-logit
+    """
+    exp_rest = logits_rest.exp()
+    denom = 1.0 + exp_rest.sum()
+    probs = torch.cat([
+        torch.tensor([1.0], device=logits_rest.device, dtype=logits_rest.dtype),
+        exp_rest
+    ]) / denom
+    return probs

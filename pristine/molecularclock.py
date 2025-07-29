@@ -187,3 +187,16 @@ class ContinuousAdditiveRelaxedClock:
         
     def loss(self) -> torch.Tensor:
         return -self.log_likelihood().sum()
+    
+#########################################################################
+# BASE CONSTANT CLOCK MODEL
+#########################################################################
+
+@torch.jit.script
+class ConstantClock:
+    def __init__(self, log_rate: Optional[torch.Tensor] = None):
+        self.log_rate = log_rate if log_rate is not None else \
+            torch.tensor(0.).requires_grad_(True)
+        
+    def rate(self):
+        return self.log_rate.exp()
