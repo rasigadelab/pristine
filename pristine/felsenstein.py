@@ -65,9 +65,10 @@ import torch.nn.functional as F
 from typing import List, Any, Optional
 
 from .edgelist import TreeTimeCalibrator
-from .gtr import GeneralizedTimeReversibleModel
+# from .gtr import GeneralizedTimeReversibleModel
 from .sequence import CollapsedConditionalLikelihood
 from .molecularclock import ConstantClock
+from .substitution_models import GTRModel
 
 @torch.jit.script
 def get_postorder_edge_list(treecal: TreeTimeCalibrator):
@@ -106,13 +107,13 @@ class FelsensteinPruningAlgorithm:
     TorchScript class for FPA.
     """
     def __init__(self,
-                 substitution_model: GeneralizedTimeReversibleModel, 
+                 substitution_model: GTRModel, 
                  markers: CollapsedConditionalLikelihood,
                  treecal: TreeTimeCalibrator,
                  clock: Optional[ConstantClock] = None):
         self.eps = 1e-16
         self.clock: ConstantClock = clock if clock is not None else ConstantClock()
-        self.substitution_model: GeneralizedTimeReversibleModel = substitution_model
+        self.substitution_model: GTRModel = substitution_model
         self.markers: CollapsedConditionalLikelihood = markers
         self.ancestor_states: torch.Tensor = markers.unique_patterns.clone().detach()
         self.treecal: TreeTimeCalibrator = treecal

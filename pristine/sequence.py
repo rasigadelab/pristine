@@ -55,8 +55,9 @@ import torch.nn.functional as F
 from typing import Dict
 
 from .binarytree import BinaryTreeNode
-from .gtr import GeneralizedTimeReversibleModel
+# from .gtr import GeneralizedTimeReversibleModel
 from .molecularclock import ConstantClock
+from .substitution_models import GTRModel
 
 #########################################################################
 # SEQUENCE SIMULATION (PYTHON SIDE)
@@ -86,11 +87,11 @@ class SequenceSimulationVisitor(BinaryTreeNode.Visitor):
     """
     def __init__(self,
                  clock: ConstantClock,
-                 transition_model: GeneralizedTimeReversibleModel, 
+                 transition_model: GTRModel, 
                  sequence_length: int = 1):
         self.clock = clock
         self.sequence_length: int = sequence_length
-        self.transition_model: GeneralizedTimeReversibleModel = transition_model
+        self.transition_model: GTRModel = transition_model
         Q, pi = transition_model.rate_matrix_stationary_dist()
         self.transition_matrix: torch.Tensor = Q
         self.stationary_distribution: torch.Tensor = pi
