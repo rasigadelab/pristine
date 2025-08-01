@@ -149,36 +149,6 @@ class TreeTimeCalibrator:
         node_id_to_local[self.node_indices] = torch.arange(self.nnodes(), dtype=torch.long)
         return node_id_to_local[self.children]
 
-    # def reroot_along_edge(self, edge_index: int, alpha: float) -> "TreeTimeCalibrator":
-    #     """
-    #     Return a new TreeTimeCalibrator rerooted along the given edge at fractional position alpha.
-    #     """
-    #     assert 0 < alpha < 1, "alpha must be in (0,1) for valid edge split"
-    #     import copy
-
-    #     new_tree = copy.deepcopy(self)
-
-    #     L = new_tree.parents[edge_index].item()
-    #     R = new_tree.children[edge_index].item()
-    #     w = new_tree.edge_lengths[edge_index].item()
-    #     wL, wR = w * alpha, w * (1 - alpha)
-
-    #     # New root node index
-    #     root = new_tree.numnodes()
-    #     new_tree.add_node()  # adds one new internal node
-
-    #     # Remove original edge
-    #     new_tree.parents[edge_index] = -1  # mark as detached
-    #     new_tree.children[edge_index] = -1
-
-    #     # Add two edges: L → root and root → R
-    #     new_tree.add_edge(L, root, length=wL)
-    #     new_tree.add_edge(root, R, length=wR)
-
-    #     # Set root
-    #     new_tree.set_root(root)
-    #     return new_tree
-
 
 class EdgeList:
     """
@@ -248,7 +218,7 @@ class EdgeList:
                 return f"{node_id}"  # Leaf node
             return f"({','.join(f'{recursive_newick(child)}:{length:.6e}' for child, length in child_map[node_id])}){node_id}"
         
-        return recursive_newick(0) + ";"
+        return recursive_newick(self.root()) + ";"
     
     def as_Phylo(self):
         from Bio import Phylo
@@ -429,7 +399,40 @@ class EdgeList:
         edges = [e for e in zip(treecal.parents.tolist(), treecal.children.tolist())]
         edge_lengths = treecal.durations().tolist()
         return EdgeList(edges, edge_lengths)
-    
+
+    def add_edge(self, parent: int, child: int, length: float = 0.0):
+        """
+        Add an edge (parent, child) with specified branch length.
+        """
+        self.edges.append((parent, child))
+        self.edge_lengths.append(length)
+
+    def remove_edge(self, index: int):
+        """
+        Remove the edge at the given index from the edge list and its branch length.
+
+        Args:
+            index: integer index of the edge to remove
+        """
+        if 0 <= index < len(self.edges):
+            del self.edges[index]
+            del self.edge_lengths[index]
+        else:
+            raise IndexError(f"Edge index {index} is out of bounds for removal.")
+
+    def remove_edge_by_nodes(self, parent: int, child: int):
+        """
+        Remove the edge (parent, child) if it exists.
+
+        Raises:
+            ValueError if the edge is not found.
+        """
+        for i, (p, c) in enumerate(self.edges):
+            if p == parent and c == child:
+                self.remove_edge(i)
+                return
+        raise ValueError(f"Edge ({parent}, {child}) not found in the tree.")
+
     # UNTESTED
     def reroot_along_edge(self, edge_index: int, alpha: float) -> "EdgeList":
         """
@@ -446,25 +449,21 @@ class EdgeList:
 
         import copy
         newtree = copy.deepcopy(self)
-
-        L = newtree.parents[edge_index].item()
-        R = newtree.children[edge_index].item()
-        w = newtree.edge_lengths[edge_index].item()
+        parents, children = zip(*newtree.edges)
+        L = parents[edge_index]
+        R = children[edge_index]
+        w = newtree.edge_lengths[edge_index]
         wL, wR = alpha * w, (1 - alpha) * w
 
         # Create a new internal node to serve as the root
-        root = newtree.numnodes()
-        newtree.add_node()
+        root = max(parents + children) + 1
 
         # Remove the original edge by marking it detached
-        newtree.parents[edge_index] = -1
-        newtree.children[edge_index] = -1
-        newtree.edge_lengths[edge_index] = 0.0
+        self.remove_edge(edge_index)
 
         # Add edges L → root and root → R
-        newtree.add_edge(L, root, length=wL)
+        newtree.add_edge(root, L, length=wL)
         newtree.add_edge(root, R, length=wR)
 
-        # Set the new root
-        newtree.set_root(root)
         return newtree
+

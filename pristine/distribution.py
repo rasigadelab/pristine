@@ -27,6 +27,7 @@ and basic Markov model functions
 """
 import torch
 import torch.nn.functional as F
+import torch.special
 
 @torch.jit.script
 def barrier_positive(x: torch.Tensor, strength: float = 1e6):
@@ -43,6 +44,54 @@ def gamma_log_probability(x: torch.Tensor, shape:torch.Tensor, rate: torch.Tenso
         - torch.lgamma(shape)
         + shape * torch.log(rate)
     )
+
+# @torch.jit.script
+# def gamma_icdf(p: torch.Tensor, shape: torch.Tensor, rate: torch.Tensor) -> torch.Tensor:
+#     """
+#     TorchScript-compatible Gamma ICDF using gammaincinv.
+#     Args:
+#         alpha: shape parameter (scalar or broadcastable tensor)
+#         beta: rate parameter
+#         p: quantile levels ∈ (0, 1)
+
+#     Returns:
+#         Tensor of quantile values with shape of broadcast(alpha, beta, p)
+#     """
+#     return torch.special.gammaincinv(shape, p) / rate
+
+from torch.special import gammainc
+
+@torch.jit.script
+def gamma_icdf(p: torch.Tensor, shape: torch.Tensor, rate: torch.Tensor, n_steps: int = 20):
+    # x = shape / rate
+    x = torch.max(torch.tensor(1e-8, device=p.device), (p * shape)**(1 / shape)) / rate
+    for i in range(n_steps):
+        cdf = gammainc(shape, rate * x)
+        pdf = torch.exp((shape - 1)*torch.log(x) - rate*x - torch.lgamma(shape) + shape*torch.log(rate))
+        x = x - (cdf - p) / (rate * pdf)
+    return x
+
+@torch.jit.script
+def gamma_icdf_hybrid(p: torch.Tensor, shape: torch.Tensor, rate: torch.Tensor, 
+                      n_bisect: int=10, n_newton: int=10):
+    # Initial bracket: [low, high]
+    low = torch.zeros_like(p)
+    high = 10 * shape / rate + 10.0  # loose upper bound
+    for _ in range(n_bisect):
+        mid = (low + high) / 2
+        cdf = gammainc(shape, rate * mid)
+        high = torch.where(cdf > p, mid, high)
+        low = torch.where(cdf <= p, mid, low)
+    x = (low + high) / 2
+
+    # Newton refinement
+    for _ in range(n_newton):
+        cdf = gammainc(shape, rate * x)
+        pdf = torch.exp((shape - 1)*torch.log(x) - rate*x - torch.lgamma(shape) + shape*torch.log(rate))
+        update = (cdf - p) / (rate * pdf)
+        x = x - update
+    return x
+
 
 @torch.jit.script
 def JC69_probability(t: torch.Tensor, K: torch.Tensor) -> torch.Tensor:

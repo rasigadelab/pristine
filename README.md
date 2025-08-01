@@ -1,10 +1,10 @@
 # <span style="color:red">PRISTINE</span> phylodynamics
 
-**PRISTINE** (PRofile-based Inference for STatIstical NEtworks) is a high-performance, differentiable framework for statistical inference on phylogenetic trees. It emphasizes robust likelihood computation, flexible parameter control, changing fixed and free parameters, uncertainty quantification, and model identifiability analysis.
+**PRISTINE** (PRofile-based Inference for STatIstical NEtworks) is a high-performance, differentiable framework for statistical inference on phylogenetic trees. It emphasizes robust likelihood computation, flexible parameter control, dynamic parameter freezing/unfreezing, uncertainty quantification, and model identifiability analysis.
 
 See [PRISTINE documentation](https://rasigadelab.github.io/pristine/) for more details.
 
-**/!\\** The framework is in early stages of development. API may change without warning. **/!\\** 
+**/!\\** The framework is under active development. API may change without warning. **/!\\**
 
 ---
 
@@ -12,13 +12,15 @@ See [PRISTINE documentation](https://rasigadelab.github.io/pristine/) for more d
 
 PRISTINE is designed to:
 
-- Enable efficient and differentiable likelihood evaluation using Felsenstein's pruning algorithm.
-- Support birth-death-sampling models and molecular clocks for time-calibrated phylogenetic inference.
-- Simulate and preprocess molecular sequence data on trees with support for state compression.
-- Offer robust parameter optimization with adaptive backtracking to avoid divergence.
-- Provide confidence intervals via Laplace approximation and likelihood profiling.
-- Analyze model curvature and identifiability via Hessian eigenvalue diagnostics.
-- Model evolution using Generalized Time Reversible (GTR) and JC69 substitution matrices.
+* Enable efficient likelihood evaluation using Felsenstein's pruning algorithm.
+* Support time-calibrated phylogenetic inference via birth-death-sampling (BDS) models and molecular clocks.
+* Simulate and preprocess molecular sequence data on trees.
+* Handle JC69, HKY, TN93, and GTR substitution models with consistent parameter normalization.
+* Offer robust optimization with adaptive backtracking.
+* Provide confidence intervals through Laplace approximation or full likelihood profiling.
+* Analyze model curvature and identifiability with Hessian eigenvalue diagnostics.
+* Support flexible and state-dependent BDS models: constant, multistate, linear, or fully relaxed.
+* Serialize and restore model parameters for reproducibility or checkpointing.
 
 ---
 
@@ -26,12 +28,13 @@ PRISTINE is designed to:
 
 > **Requirements:** Python ≥ 3.10, PyTorch ≥ 2.6
 
-To install PRISTINE in your environment, run:
+To install PRISTINE and run the examples:
 
 ```bash
 git clone https://github.com/your-org/pristine.git
 cd pristine
 pip install .
+python examples/run_all.py
 ```
 
 ---
@@ -42,16 +45,18 @@ pip install .
 
 ```python
 from pristine.binarytree import BinaryTreeNode
-from pristine.sequence import SequenceSimulationVisitor, SequenceCollector
-from pristine.gtr import GeneralizedTimeReversibleModel
+from pristine.sequence import SequenceSimulationVisitor, SequenceCollector, CollapsedConditionalLikelihood
+from pristine.substitution_models import GTRModel
+from pristine.molecularclock import ConstantClock
 
 tree = BinaryTreeNode().grow_aldous_tree(n=10).reindex()
-gtr = GeneralizedTimeReversibleModel(K=4)
-sim = SequenceSimulationVisitor(gtr, sequence_length=100)
-tree.bfs(sim)
+clock = ConstantClock()
+model = GTRModel(4)
+visitor = SequenceSimulationVisitor(clock, model, sequence_length=100)
+tree.bfs(visitor)
 
-collector = SequenceCollector(tree).collect()
-collapsed = collector.erase_node_sequences()
+collector = SequenceCollector(tree).collect().erase_node_sequences()
+collapsed = CollapsedConditionalLikelihood(collector)
 ```
 
 ### 2. Compute Likelihood with Felsenstein Pruning
@@ -59,7 +64,8 @@ collapsed = collector.erase_node_sequences()
 ```python
 from pristine.felsenstein import FelsensteinPruningAlgorithm
 
-fpa = FelsensteinPruningAlgorithm(gtr, collapsed, tree.edgelist().get_tree_time_calibrator_fixed())
+treecal = tree.edgelist().get_tree_time_calibrator_fixed()
+fpa = FelsensteinPruningAlgorithm(model, collapsed, treecal, clock)
 logL = fpa.log_likelihood()
 ```
 
@@ -68,33 +74,38 @@ logL = fpa.log_likelihood()
 ```python
 from pristine.optimize import Optimizer
 
-opt = Optimizer(gtr)
+opt = Optimizer(fpa)
 opt.optimize()
+opt.plot_diagnostics()
 ```
 
-### 4. Compute Confidence Intervals
+### 4. Estimate Confidence Intervals and Assess Parameter Identifiability
 
 ```python
 from pristine.likelihood_profiler import LikelihoodProfiler
 
-profiler = LikelihoodProfiler(gtr, "stationary_logits[1]")
-ci_lower, ci_upper = profiler.estimate_confint()
+profiler = LikelihoodProfiler(fpa)
+profiler.estimate_confints(["stationary_logits[1]", "free_rates_log[0]"], method="profile")
+profiler.curvature_report(top_k=3)
 ```
 
 ---
 
 ## Structure
 
-- `felsenstein.py`: Core differentiable pruning algorithm
-- `sequence.py`: Sequence simulation and pattern collapsing
-- `laplace_estimator.py`: Uncertainty quantification via curvature
-- `likelihood_profiler.py`: Confidence interval estimation by profiling
-- `gtr.py`, `molecularclock.py`: Substitution and clock models
-- `bds_model.py`: Birth-death-sampling models and extensions
-- `parameter_tools.py`: Flat indexing and tensor introspection
-- `optimize.py`: Robust optimizer with learning rate backtracking
-- `binarytree.py`: General binary tree simulation and traversal
-- `distribution.py`: Distribution functions and barrier terms
+* `felsenstein.py`: Differentiable pruning algorithm for likelihood evaluation
+* `sequence.py`: Sequence simulation and pattern collapsing
+* `substitution_models.py`: JC69, HKY, TN93, and GTR substitution models
+* `molecularclock.py`: Constant and relaxed molecular clock models
+* `bds_model.py`: Constant, state-dependent, and relaxed birth-death-sampling models
+* `parameter_tools.py`: Parameter flattening, aliasing, and indexing tools
+* `optimize.py`: Adaptive optimizer with backtracking and convergence restarts
+* `likelihood_profiler.py`: Profile and Laplace-based confidence intervals
+* `hessian_tools.py`: Curvature diagnostics and Laplace variance estimators
+* `io_tools.py`: Save/load model state to disk
+* `distribution.py`: Distributions, barrier functions, JC69 formula
+* `binarytree.py`: Tree construction, simulation, and traversal
+* `plot.py`: Visualization of parameter calibration and confidence intervals
 
 ---
 
