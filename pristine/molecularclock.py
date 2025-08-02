@@ -65,6 +65,7 @@ import math
 from typing import Optional, Tuple
 from . import distribution as D
 from .edgelist import TreeTimeCalibrator
+from .qma import QMAGrid
 
 #########################################################################
 # CONDITIONAL CLOCK MODEL
@@ -218,44 +219,41 @@ class RelaxedGammaClock:
 
     Model summary
     -------------
-    - Latent per-edge substitution rates μ_e are drawn (in simulation) from
-         log μ_e ~ Normal(mean=log_rate_mean, std=exp(log_rate_log_std))
+    - Latent per-edge substitution rates mu_e are drawn (in simulation) from
+         log mu_e ~ Normal(mean=log_rate_mean, std=exp(log_rate_log_std))
     - Genetic distances d_e are simulated via
-         d_e = (1/num_markers) · Gamma(shape = μ_e · τ_e · num_markers, rate = 1)
-      where τ_e is the edge duration from `treecal`.
-    - In inference, the model marginalizes out μ_e by evaluating Q quantiles of
-      the log-Normal prior:
-         θ_q = log_rate_mean + exp(log_rate_log_std) · z_q,
-         μ_q = exp(θ_q),
-      with z_q the standard-Normal inverse-CDF midpoints.
+         d_e = (1/num_markers) · Gamma(shape = mu_e · tau_e · num_markers, rate = 1)
+      where tau_e is the edge duration from `treecal`.
+    - In inference, the model marginalizes out mu_e by evaluating the provided QMA grid:
+         theta_q = log_rate_mean + exp(log_rate_log_std) · z_q,
+         mu_q    = exp(theta_q),
+      where z_q and the corresponding weights are taken from `qma_grid`.
     - The per-edge likelihood is
-         p(d_e) ≈ (1/Q) ∑_{q=1}^Q Gamma(d_e·num_markers | shape=μ_q·τ_e·num_markers, rate=1).
-      We compute log-mean-exp over Q and return one log-likelihood per edge.
+         p(d_e) ≈ sum_q [ w_q · Gamma(d_e·num_markers | shape=mu_q·tau_e·num_markers, rate=1) ]
+      where w_q are the weights from the QMA grid.  We compute a log-sum-exp over q
+      for each edge and return one log-likelihood per edge.
 
     Parameters
     ----------
     treecal : TreeTimeCalibrator
         A calibrator object providing:
-          - `.durations()` → tensor of branch durations τ_e, shape (E,)
+          - `.durations()` → tensor of branch durations tau_e, shape (E,)
           - mutable attribute `.distances` for simulation, shape (E,)
     num_markers : int
         Number of independent markers (e.g., sites) used in distance simulation.
     log_rate_mean : torch.Tensor, optional
-        Initial value of the prior mean of log-rate (μ in log-space). Scalar tensor
+        Initial value of the prior mean of log-rate (mu in log-space).  Scalar tensor
         with requires_grad=True to permit learning.
         Defaults to 0.0 (i.e. prior mean rate = 1.0).
     log_rate_log_std : torch.Tensor, optional
         Initial value of the log of the prior standard deviation of log-rate
-        (σ in log-space). Scalar tensor with requires_grad=True.
-        Defaults to 0.0 (i.e. prior σ = 1.0 in log-space).
-    num_quantiles : int, optional
-        Number of quantile midpoints Q to use in the QMA. Defaults to 8.
-
-    Attributes
-    ----------
-    z_grid : torch.Tensor, shape (Q,)
-        Precomputed standard-Normal quantile midpoints:
-            z_q = Φ^{-1}((q - 0.5)/Q).
+        (sigma in log-space).  Scalar tensor with requires_grad=True.
+        Defaults to -2.0 (i.e. prior sigma = exp(-2) in log-space).
+    qma_grid : QMAGrid, optional
+        A QMA grid object that provides:
+          - `nodes`: the quantile points for theta = log-rate
+          - `weights`: the integration weights for each node
+        If None, a default symmetric 8-point grid is used.
 
     Methods
     -------
@@ -287,7 +285,7 @@ class RelaxedGammaClock:
                 num_markers: int,
                 log_rate_mean: Optional[torch.Tensor] = None,
                 log_rate_log_std: Optional[torch.Tensor] = None,
-                num_quantiles: Optional[int] = None
+                qma_grid: Optional[QMAGrid] = None
                 ):
         self.treecal: TreeTimeCalibrator = treecal
         self.log_rate_mean: torch.Tensor = log_rate_mean if log_rate_mean is not None else \
@@ -295,10 +293,10 @@ class RelaxedGammaClock:
         self.log_rate_log_std: torch.Tensor = log_rate_log_std if log_rate_log_std is not None else \
             torch.tensor(-2.).requires_grad_(True)                  # σ in log-space
         self.num_markers: int = num_markers
-        self.num_quantiles: int = num_quantiles if num_quantiles is not None else int(8)
-        # Generate Q quantiles of standard Normal
-        probs = torch.linspace(0.5 / self.num_quantiles, 1.0 - 0.5 / self.num_quantiles, self.num_quantiles)
-        self.z_grid = torch.erfinv(2 * probs - 1) * math.sqrt(2)  # inverse CDF of Normal(0,1)
+        self.qma_grid: QMAGrid = qma_grid if qma_grid is not None else QMAGrid(
+            torch.tensor([-2.9306, -1.9817, -1.1572, -0.3812,  0.3812,  1.1572,  1.9817,  2.9306]),
+            torch.tensor([1.1261e-04, 9.6352e-03, 1.1724e-01, 3.7301e-01, 3.7301e-01, 1.1724e-01, 9.6352e-03, 1.1261e-04])
+        )
 
     def simulate(self) -> torch.Tensor:
         durations = self.treecal.durations()
@@ -309,10 +307,10 @@ class RelaxedGammaClock:
     
     def log_likelihood(self) -> torch.Tensor:
         E = self.treecal.nedges()
-        Q = self.num_quantiles
+        Q = self.qma_grid.num_nodes
         
         # Transform to log-rate: θ_q = μ + σ · z
-        theta_q = self.log_rate_mean + self.log_rate_log_std.exp() * self.z_grid  # shape (Q,)
+        theta_q = self.log_rate_mean + self.log_rate_log_std.exp() * self.qma_grid.nodes  # shape (Q,)
         mu_q = theta_q.exp().view(Q, 1)                        # shape (Q, 1)
 
         # Compute Gamma shape = μ_q × τ_e × L
@@ -324,8 +322,10 @@ class RelaxedGammaClock:
         d = self.treecal.distances.view(1, E).expand(Q, E)
         logprob = D.gamma_log_probability(d * self.num_markers, shape_qe.clamp(1e-8), torch.tensor(1.))  # (Q, E)
 
+        w = self.qma_grid.weights                                # (Q,)
+        log_w = torch.log(w).view(Q, 1)                          # (Q,1)
         # Marginalize per edge
-        log_lik_e = torch.logsumexp(logprob, dim=0) - math.log(Q)
+        log_lik_e = torch.logsumexp(logprob + log_w, dim=0)
         return log_lik_e - D.barrier_positive(durations)
 
     def loss(self) -> torch.Tensor:
