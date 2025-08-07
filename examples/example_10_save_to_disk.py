@@ -57,7 +57,7 @@ clock = ContinuousAdditiveRelaxedClock(
 # OPTIMIZE AND PRINT RESULTS
 #########################################################################
 
-io = IOTools(clock, "clock.pt")
+io = IOTools(clock, "clock.pt", trainable_only=False)
 io.save()
 
 # model = Model(clock=clock, treecal=treecal)

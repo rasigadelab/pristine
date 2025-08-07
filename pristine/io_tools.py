@@ -21,7 +21,7 @@
 # -----------------------------------------------------------------------------
 import torch
 from typing import Any, Dict
-
+from .parameter_tools import ParameterTools
 
 class IOTools:
     """
@@ -48,10 +48,12 @@ class IOTools:
           when possible.
         - Key format is dot-qualified for attributes and indexed for sequences (e.g., 'foo.bar[0].weight').
     """
-    def __init__(self, obj: Any, filename: str):
+    def __init__(self, obj: Any, filename: str, trainable_only: bool = False):
         self.obj: Any = obj
         self.filename: str = filename
         self.state: Dict[str, Any] = {}
+        self.trainable_only: bool = trainable_only
+        self.pt: ParameterTools = ParameterTools(obj)
 
     def extract_state(self) -> Dict[str, Any]:
         """
@@ -60,7 +62,17 @@ class IOTools:
         """
         self.state = {}
 
+        if self.trainable_only:
+            for name, tensor in self.pt.get_named_parameters():
+                if tensor.numel() == 1:
+                    self.state[name] = tensor.item()
+                else:
+                    self.state[name] = tensor.detach().clone()
+            return self.state
+
         def _traverse(prefix, item):
+            # if allowed_keys is not None and prefix not in allowed_keys:
+            #     return
             if isinstance(item, (int, float, bool, str)) or (isinstance(item, torch.Tensor) and item.numel() == 1):
                 self.state[prefix] = item.item() if isinstance(item, torch.Tensor) else item
             elif isinstance(item, torch.Tensor):
