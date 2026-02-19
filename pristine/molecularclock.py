@@ -330,3 +330,6 @@ class RelaxedGammaClock:
 
     def loss(self) -> torch.Tensor:
         return -self.log_likelihood().sum()
+    
+    def rate(self):
+        return self.log_rate_mean.exp()

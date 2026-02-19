@@ -71,22 +71,22 @@ root = bdsforward.simulate(n)
 """
 Plot tree states
 """
-# import toytree
+import toytree
 
 nodes = root.nodelist()
-# tree = toytree.tree(root.newick(), internal_labels="name")
-# tree_ordered_nodes = [nodes[ int(node.name) ] for node in tree.get_nodes()]
+tree = toytree.tree(root.newick(), internal_labels="name")
+tree_ordered_nodes = [nodes[ int(node.name) ] for node in tree.get_nodes()]
 
-# tree.set_node_data(feature="state", data =[node.data.state_indices().item() for node in tree_ordered_nodes], default=0, inplace=True)
-# tree.set_node_data(feature="birth", data =[node.data.birth_rate for node in tree_ordered_nodes], default=0, inplace=True)
-# tree.draw(
-#     node_labels="state", node_sizes=15, node_mask=False, node_colors=("state", "BlueRed"),
-#     edge_colors="white", edge_widths=1,
-#     tip_labels_style={"font-size": 10, "anchor-shift": 20},
-#     tip_labels_colors="white",
-#     scale_bar=True,
-#     width = 600
-# )
+tree.set_node_data(feature="state", data =[node.data.state_indices().item() for node in tree_ordered_nodes], default=0, inplace=True)
+tree.set_node_data(feature="birth", data =[node.data.birth_rate for node in tree_ordered_nodes], default=0, inplace=True)
+tree.draw(
+    node_labels="state", node_sizes=15, node_mask=False, node_colors=("state", "BlueRed"),
+    edge_colors="white", edge_widths=1,
+    tip_labels_style={"font-size": 10, "anchor-shift": 20},
+    tip_labels_colors="white",
+    scale_bar=True,
+    width = 600
+)
 
 """
 Check that branch lengths differ sufficiently depending on marker state
